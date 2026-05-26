@@ -98,6 +98,10 @@ export async function POST(request: Request) {
   try {
     const response = await client.responses.create({
       model: process.env.OPENAI_MODEL ?? "gpt-5.4",
+      max_output_tokens: 500,
+      reasoning: {
+        effort: "none",
+      },
       input: [
         {
           role: "user",

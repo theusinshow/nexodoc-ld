@@ -4,6 +4,24 @@ Todas as alterações relevantes deste projeto devem ser registradas aqui.
 
 ## 2026-05-26
 
+### Limitado custo por extração visual individual
+
+- A chamada ao `gpt-5.4` para leitura de selo agora limita a resposta a 500 tokens.
+- Definido `reasoning.effort` como `none`, adequado à extração estruturada curta.
+- O recorte enviado foi reduzido para no máximo 1200 pixels por eixo e JPEG de qualidade controlada.
+- O objetivo é viabilizar o teste com saldo reduzido sem comprometer a região textual do selo.
+
+Arquivos impactados:
+
+- `src/app/api/extract-stamp/route.ts`
+- `src/app/page.tsx`
+- `changelog.md`
+
+Validações executadas:
+
+- `npm run lint`
+- `npm run build`
+
 ### Reduzido custo da imagem enviada para leitura visual
 
 - Confirmado por diagnóstico que a nova chave aceita chamadas textuais e visuais no projeto `NexoDoc-ld`.
