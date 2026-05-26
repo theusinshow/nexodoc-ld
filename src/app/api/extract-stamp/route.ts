@@ -73,6 +73,10 @@ function isValidImageDataUrl(value: unknown): value is string {
   return typeof value === "string" && /^data:image\/(png|jpeg|webp);base64,/.test(value);
 }
 
+function isValidPdfText(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= 60000;
+}
+
 export async function POST(request: Request) {
   if (!process.env.OPENAI_API_KEY) {
     return NextResponse.json(
@@ -81,19 +85,44 @@ export async function POST(request: Request) {
     );
   }
 
-  const body = (await request.json()) as { imageDataUrl?: unknown };
+  const body = (await request.json()) as { imageDataUrl?: unknown; pdfText?: unknown };
+  const hasImage = isValidImageDataUrl(body.imageDataUrl);
+  const hasPdfText = isValidPdfText(body.pdfText);
 
-  if (!isValidImageDataUrl(body.imageDataUrl)) {
+  if (!hasImage && !hasPdfText) {
     return NextResponse.json(
-      { error: "Imagem do selo inválida ou ausente." },
+      { error: "Texto ou imagem do selo inválidos ou ausentes." },
       { status: 400 },
     );
   }
 
-  const imageDataUrl = body.imageDataUrl;
   const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
   });
+  const inputContent = hasPdfText
+    ? [
+        {
+          type: "input_text" as const,
+          text: `${systemPrompt}
+
+O conteúdo abaixo foi extraído do PDF e pode estar fora de ordem por causa da diagramação.
+Identifique os valores associados aos rótulos do selo sem usar o nome do arquivo enviado.
+
+TEXTO EXTRAÍDO:
+${body.pdfText}`,
+        },
+      ]
+    : [
+        {
+          type: "input_text" as const,
+          text: systemPrompt,
+        },
+        {
+          type: "input_image" as const,
+          image_url: body.imageDataUrl as string,
+          detail: "high" as const,
+        },
+      ];
 
   try {
     const response = await client.responses.create({
@@ -105,17 +134,7 @@ export async function POST(request: Request) {
       input: [
         {
           role: "user",
-          content: [
-            {
-              type: "input_text",
-              text: systemPrompt,
-            },
-            {
-              type: "input_image",
-              image_url: imageDataUrl,
-              detail: "high",
-            },
-          ],
+          content: inputContent,
         },
       ],
       text: {
@@ -137,6 +156,7 @@ export async function POST(request: Request) {
       code?: string;
       type?: string;
       message?: string;
+      headers?: Headers;
     };
     const status = apiError.status ?? 500;
     const isQuotaError =
@@ -144,11 +164,18 @@ export async function POST(request: Request) {
       apiError.type === "insufficient_quota";
     const isRateLimitError = status === 429 && !isQuotaError;
     const message = isQuotaError
-      ? "A OpenAI foi chamada, mas a chave configurada está sem cota ou billing disponível."
+      ? "A OpenAI foi chamada, mas retornou falta de cota ou billing disponível para esta extração."
       : isRateLimitError
-        ? "A OpenAI foi chamada, mas limitou temporariamente a leitura visual. Tente novamente com menos páginas por vez."
+        ? "A OpenAI foi chamada, mas limitou temporariamente esta extração. Tente novamente com menos páginas por vez."
       : apiError.message ?? "Falha ao chamar a OpenAI para ler o selo.";
 
-    return NextResponse.json({ error: message, code: apiError.code ?? apiError.type ?? null }, { status });
+    return NextResponse.json(
+      {
+        error: message,
+        code: apiError.code ?? apiError.type ?? null,
+        projectId: apiError.headers?.get("openai-project") ?? null,
+      },
+      { status },
+    );
   }
 }

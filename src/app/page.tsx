@@ -50,8 +50,8 @@ type PdfReadResult = {
     file: boolean;
     description: boolean;
   };
-  visualFallback: "not-needed" | "success" | "failed";
-  visualError?: string;
+  aiExtraction: "not-used" | "text" | "visual" | "failed";
+  aiError?: string;
 };
 
 type Tomo = {
@@ -354,7 +354,7 @@ function parsePdfTextToRow(
         (Boolean(normalizedRawSheet) && normalizedRawSheet !== sheet),
       reviewedAlertKeys: [],
     },
-    visualFallback: "not-needed",
+    aiExtraction: "not-used",
   };
 }
 
@@ -442,13 +442,34 @@ async function requestVisualStampExtraction(imageDataUrl: string) {
 
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(payload?.error ?? "Fallback visual indisponível.");
+    throw new Error(payload?.error ?? "Leitura visual por IA indisponível.");
   }
 
   return (await response.json()) as VisualStampExtraction;
 }
 
-function mergeVisualExtraction(result: PdfReadResult, extraction: VisualStampExtraction): PdfReadResult {
+async function requestTextStampExtraction(pdfText: string) {
+  const response = await fetch("/api/extract-stamp", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ pdfText }),
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(payload?.error ?? "Leitura textual por IA indisponível.");
+  }
+
+  return (await response.json()) as VisualStampExtraction;
+}
+
+function mergeAiExtraction(
+  result: PdfReadResult,
+  extraction: VisualStampExtraction,
+  source: "text" | "visual",
+): PdfReadResult {
   const sheet = buildSheetFromVisualExtraction(extraction) || result.row.sheet;
   const visualFile = normalizeExtractedValue(extraction.arquivo ?? "");
   const visualDescription = cleanDescriptionValue(extraction.conteudo ?? "");
@@ -467,7 +488,7 @@ function mergeVisualExtraction(result: PdfReadResult, extraction: VisualStampExt
   return {
     ...result,
     foundFields,
-    visualFallback: "success",
+    aiExtraction: source,
     row: {
       ...result.row,
       sheet,
@@ -744,6 +765,9 @@ export default function Home() {
 
     setPdfProcessing(true);
     setPdfReadError("");
+    setPdfReadResults([]);
+    setRows([]);
+    setReviewedGlobalWarnings([]);
 
     try {
       const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
@@ -785,6 +809,16 @@ export default function Home() {
           const stampText = groupTextLines(stampItems).join(" ");
           const expandedStampText = groupTextLines(expandedStampItems).join(" ");
           const candidateText = stampText || expandedStampText || fullText;
+          const textForAi = [
+            stampText ? `REGIAO DO SELO:\n${stampText}` : "",
+            expandedStampText && expandedStampText !== stampText
+              ? `REGIAO AMPLIADA:\n${expandedStampText}`
+              : "",
+            fullText ? `PAGINA COMPLETA:\n${fullText}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n\n")
+            .slice(0, 60000);
 
           const textResult = parsePdfTextToRow(
             candidateText,
@@ -795,27 +829,40 @@ export default function Home() {
             referenceTotal,
           );
           let pageResult = textResult;
+          let textAiError = "";
 
           try {
-            const imageDataUrl = await renderStampCropToDataUrl(page);
-            const visualExtraction = await requestVisualStampExtraction(imageDataUrl);
-            pageResult = mergeVisualExtraction(textResult, visualExtraction);
-          } catch (fallbackError) {
-            const visualError =
-              fallbackError instanceof Error
-                ? fallbackError.message
-                : "Leitura visual por IA falhou.";
+            if (textForAi) {
+              const textExtraction = await requestTextStampExtraction(textForAi);
+              pageResult = mergeAiExtraction(textResult, textExtraction, "text");
+            }
+          } catch (textError) {
+            textAiError =
+              textError instanceof Error
+                ? textError.message
+                : "Leitura textual por IA falhou.";
+          }
 
-            if (hasMissingStampFields(textResult)) {
+          if (hasMissingStampFields(pageResult)) {
+            try {
+              const imageDataUrl = await renderStampCropToDataUrl(page);
+              const visualExtraction = await requestVisualStampExtraction(imageDataUrl);
+              pageResult = mergeAiExtraction(textResult, visualExtraction, "visual");
+            } catch (visualError) {
+              const message =
+                visualError instanceof Error
+                  ? visualError.message
+                  : "Leitura visual por IA falhou.";
+
               throw new Error(
-                `A leitura visual por IA falhou em ${file.name}, página ${pageNumber}: ${visualError}`,
+                `A leitura por IA falhou em ${file.name}, página ${pageNumber}: ${textAiError || message}`,
               );
             }
-
+          } else if (textAiError) {
             pageResult = {
               ...textResult,
-              visualFallback: "failed",
-              visualError,
+              aiExtraction: "failed",
+              aiError: textAiError,
             };
           }
 
@@ -1326,8 +1373,9 @@ function PdfReadSummary({
   }
 
   const reviewCount = results.filter((result) => result.row.lowConfidence).length;
-  const visualSuccessCount = results.filter((result) => result.visualFallback === "success").length;
-  const visualFailedCount = results.filter((result) => result.visualFallback === "failed").length;
+  const textAiCount = results.filter((result) => result.aiExtraction === "text").length;
+  const visualAiCount = results.filter((result) => result.aiExtraction === "visual").length;
+  const aiFailedCount = results.filter((result) => result.aiExtraction === "failed").length;
 
   return (
     <div className="mt-4 rounded-md border border-border bg-background p-4">
@@ -1337,30 +1385,31 @@ function PdfReadSummary({
         ) : (
           <FileSearch size={16} className="text-accent" />
         )}
-        Leitura visual por IA
+        Extração por IA
       </div>
       {processing && (
         <p className="mt-2 text-sm text-muted-foreground">
-          Renderizando o selo de cada página e extraindo PRANCHA, ARQUIVO e CONTEÚDO com IA visual.
+          Interpretando o texto extraído do PDF; a leitura visual é usada apenas quando necessário.
         </p>
       )}
       {error && <p className="mt-2 text-sm text-danger">{error}</p>}
       {!processing && results.length > 0 && (
-        <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-5">
+        <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-6">
           <Metric label="Páginas lidas" value={String(results.length)} />
           <Metric label="Para revisão" value={String(reviewCount)} />
           <Metric label="Preenchidas" value={String(results.length - reviewCount)} />
-          <Metric label="IA visual" value={String(visualSuccessCount)} />
-          <Metric label="IA falhou" value={String(visualFailedCount)} />
+          <Metric label="IA texto" value={String(textAiCount)} />
+          <Metric label="IA visual" value={String(visualAiCount)} />
+          <Metric label="IA falhou" value={String(aiFailedCount)} />
         </div>
       )}
-      {!processing && results.some((result) => result.visualError) && (
+      {!processing && results.some((result) => result.aiError) && (
         <div className="mt-3 space-y-1 text-sm text-muted-foreground">
           {results
-            .filter((result) => result.visualError)
+            .filter((result) => result.aiError)
             .map((result) => (
               <p key={`${result.fileName}-${result.pageNumber}`}>
-                {result.fileName}, página {result.pageNumber}: {result.visualError}
+                {result.fileName}, página {result.pageNumber}: {result.aiError}
               </p>
             ))}
         </div>

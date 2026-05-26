@@ -93,7 +93,7 @@ npm run lint
 
 ## Variáveis de ambiente
 
-Para usar a leitura visual do selo com OpenAI, crie um arquivo `.env.local` com:
+Para usar a extração estruturada do selo com OpenAI, por texto do PDF e fallback visual, crie um arquivo `.env.local` com:
 
 ```bash
 OPENAI_API_KEY=sk-...
@@ -101,6 +101,8 @@ OPENAI_MODEL=gpt-5.4
 ```
 
 A chave é usada apenas pela API route backend. Ela não deve ser exposta no frontend.
+
+Se o terminal que inicia o servidor já tiver `OPENAI_API_KEY` definida, essa variável pode prevalecer sobre o arquivo `.env.local`. Ao trocar de chave durante testes locais, reinicie o servidor em um terminal sem essa variável herdada.
 
 ## Template ODT
 

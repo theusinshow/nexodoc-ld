@@ -4,6 +4,30 @@ Todas as alterações relevantes deste projeto devem ser registradas aqui.
 
 ## 2026-05-26
 
+### Alterada estratégia para IA textual com fallback visual
+
+- A extração agora envia primeiro o texto selecionável da página ao `gpt-5.4` para identificar `PRANCHA`, `ARQUIVO` e `CONTEÚDO` em JSON estruturado.
+- O recorte visual passou a ser acionado apenas quando a interpretação por texto não preenche campos obrigatórios.
+- O texto enviado inclui região do selo, região ampliada e texto completo da página, limitado a 60000 caracteres.
+- Ao iniciar um upload real, a tabela mockada é limpa imediatamente para não parecer resultado de uma análise que falhou.
+- O resumo da leitura passou a distinguir extração por IA de texto, IA visual e falhas.
+- A resposta de erro da API inclui o identificador do projeto OpenAI para diagnosticar chaves associadas ao projeto incorreto.
+- Atualizada a documentação de configuração para refletir a estratégia combinada.
+- Documentado que variáveis OpenAI herdadas pelo terminal podem prevalecer sobre `.env.local` durante testes.
+
+Arquivos impactados:
+
+- `src/app/api/extract-stamp/route.ts`
+- `src/app/page.tsx`
+- `README.md`
+- `changelog.md`
+
+Validações executadas:
+
+- `npm run lint`
+- `npm run build`
+- Validado manualmente: rota `/api/extract-stamp` retornou extração estruturada correta via texto com a chave do projeto novo.
+
 ### Aumentada qualidade visual dentro de orçamento por prancha
 
 - Ampliado o recorte visual enviado para até 2400 pixels por eixo, melhorando a leitura de textos pequenos no selo.
