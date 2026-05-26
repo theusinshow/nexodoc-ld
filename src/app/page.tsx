@@ -50,6 +50,8 @@ type PdfReadResult = {
     file: boolean;
     description: boolean;
   };
+  visualFallback: "not-needed" | "success" | "failed";
+  visualError?: string;
 };
 
 type Tomo = {
@@ -174,6 +176,16 @@ type PdfTextLine = {
   text: string;
 };
 
+type VisualStampExtraction = {
+  disciplina: string | null;
+  folha: number | null;
+  total: number | null;
+  numeroFolha: string | null;
+  arquivo: string | null;
+  conteudo: string | null;
+  confianca: "alta" | "media" | "baixa";
+};
+
 function parseSheet(value: string): ParsedSheet | null {
   const match = value.trim().match(/(\d+)\s*\/\s*(\d+)/);
 
@@ -273,6 +285,123 @@ function parsePdfTextToRow(
       readDiscipline: extractDisciplineFromPrancha(sheet),
       lowConfidence: !foundFields.sheet || !foundFields.file || !foundFields.description,
       reviewedAlertKeys: [],
+    },
+    visualFallback: "not-needed",
+  };
+}
+
+function buildSheetFromVisualExtraction(extraction: VisualStampExtraction) {
+  if (extraction.numeroFolha) {
+    return normalizeExtractedValue(extraction.numeroFolha);
+  }
+
+  if (extraction.folha && extraction.total) {
+    return formatSheet(extraction.folha, extraction.total);
+  }
+
+  return "";
+}
+
+function hasMissingStampFields(result: PdfReadResult) {
+  return !result.foundFields.sheet || !result.foundFields.file || !result.foundFields.description;
+}
+
+async function renderStampCropToDataUrl(pageProxy: unknown) {
+  const page = pageProxy as {
+  getViewport: (options: { scale: number }) => { width: number; height: number };
+  render: (options: {
+    canvasContext: CanvasRenderingContext2D;
+    canvas: HTMLCanvasElement;
+    viewport: { width: number; height: number };
+  }) => { promise: Promise<void> };
+  };
+  const viewport = page.getViewport({ scale: 2 });
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    throw new Error("Não foi possível criar o canvas para renderizar o selo.");
+  }
+
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+
+  await page.render({ canvasContext: context, canvas, viewport }).promise;
+
+  const cropX = Math.floor(canvas.width * 0.55);
+  const cropY = Math.floor(canvas.height * 0.55);
+  const cropWidth = canvas.width - cropX;
+  const cropHeight = canvas.height - cropY;
+  const cropCanvas = document.createElement("canvas");
+  const cropContext = cropCanvas.getContext("2d");
+
+  if (!cropContext) {
+    throw new Error("Não foi possível criar o recorte do selo.");
+  }
+
+  cropCanvas.width = cropWidth;
+  cropCanvas.height = cropHeight;
+  cropContext.drawImage(
+    canvas,
+    cropX,
+    cropY,
+    cropWidth,
+    cropHeight,
+    0,
+    0,
+    cropWidth,
+    cropHeight,
+  );
+
+  return cropCanvas.toDataURL("image/png");
+}
+
+async function requestVisualStampExtraction(imageDataUrl: string) {
+  const response = await fetch("/api/extract-stamp", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ imageDataUrl }),
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(payload?.error ?? "Fallback visual indisponível.");
+  }
+
+  return (await response.json()) as VisualStampExtraction;
+}
+
+function mergeVisualExtraction(result: PdfReadResult, extraction: VisualStampExtraction): PdfReadResult {
+  const sheet = buildSheetFromVisualExtraction(extraction) || result.row.sheet;
+  const file = normalizeExtractedValue(extraction.arquivo ?? "") || result.row.file;
+  const description = normalizeExtractedValue(extraction.conteudo ?? "") || result.row.description;
+  const readDiscipline =
+    normalizeExtractedValue(extraction.disciplina ?? "") ||
+    extractDisciplineFromPrancha(sheet) ||
+    result.row.readDiscipline;
+  const foundFields = {
+    sheet: Boolean(sheet),
+    file: Boolean(file),
+    description: Boolean(description),
+  };
+
+  return {
+    ...result,
+    foundFields,
+    visualFallback: "success",
+    row: {
+      ...result.row,
+      sheet,
+      file,
+      description,
+      readDiscipline,
+      lowConfidence:
+        extraction.confianca !== "alta" ||
+        !foundFields.sheet ||
+        !foundFields.file ||
+        !foundFields.description,
     },
   };
 }
@@ -551,7 +680,26 @@ export default function Home() {
           const expandedStampText = groupTextLines(expandedStampItems).join(" ");
           const candidateText = stampText || expandedStampText || fullText;
 
-          nextResults.push(parsePdfTextToRow(candidateText, fullText, file.name, pageNumber, nextId));
+          let pageResult = parsePdfTextToRow(candidateText, fullText, file.name, pageNumber, nextId);
+
+          if (hasMissingStampFields(pageResult)) {
+            try {
+              const imageDataUrl = await renderStampCropToDataUrl(page);
+              const visualExtraction = await requestVisualStampExtraction(imageDataUrl);
+              pageResult = mergeVisualExtraction(pageResult, visualExtraction);
+            } catch (fallbackError) {
+              pageResult = {
+                ...pageResult,
+                visualFallback: "failed",
+                visualError:
+                  fallbackError instanceof Error
+                    ? fallbackError.message
+                    : "Fallback visual falhou.",
+              };
+            }
+          }
+
+          nextResults.push(pageResult);
           nextId += 1;
         }
       }
@@ -919,6 +1067,8 @@ function PdfReadSummary({
   }
 
   const reviewCount = results.filter((result) => result.row.lowConfidence).length;
+  const visualSuccessCount = results.filter((result) => result.visualFallback === "success").length;
+  const visualFailedCount = results.filter((result) => result.visualFallback === "failed").length;
 
   return (
     <div className="mt-4 rounded-md border border-border bg-background p-4">
@@ -937,10 +1087,23 @@ function PdfReadSummary({
       )}
       {error && <p className="mt-2 text-sm text-danger">{error}</p>}
       {!processing && results.length > 0 && (
-        <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-3">
+        <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-5">
           <Metric label="Páginas lidas" value={String(results.length)} />
           <Metric label="Para revisão" value={String(reviewCount)} />
           <Metric label="Preenchidas" value={String(results.length - reviewCount)} />
+          <Metric label="Fallback visual" value={String(visualSuccessCount)} />
+          <Metric label="Fallback falhou" value={String(visualFailedCount)} />
+        </div>
+      )}
+      {!processing && results.some((result) => result.visualError) && (
+        <div className="mt-3 space-y-1 text-sm text-muted-foreground">
+          {results
+            .filter((result) => result.visualError)
+            .map((result) => (
+              <p key={`${result.fileName}-${result.pageNumber}`}>
+                {result.fileName}, página {result.pageNumber}: {result.visualError}
+              </p>
+            ))}
         </div>
       )}
     </div>

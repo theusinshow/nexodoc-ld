@@ -65,3 +65,30 @@ Validações executadas:
 
 - `npm run build`
 - `npm run lint`
+
+### Implementado fallback visual com OpenAI
+
+- Adicionada dependência `openai`.
+- Criada API route backend `src/app/api/extract-stamp/route.ts` para extrair dados do selo via OpenAI Responses API.
+- Adicionado JSON Schema rígido para retorno estruturado com `disciplina`, `folha`, `total`, `numeroFolha`, `arquivo`, `conteudo` e `confianca`.
+- Mantida a chave `OPENAI_API_KEY` exclusivamente no backend.
+- Criado `.env.example` com `OPENAI_API_KEY` e `OPENAI_MODEL`.
+- Implementado recorte visual do canto inferior direito da página renderizada no navegador.
+- Integrado fallback visual somente quando a leitura textual não encontra todos os campos necessários.
+- Mesclado retorno visual com dados extraídos por texto, sem reescrever `CONTEÚDO`.
+- Atualizado resumo de leitura para indicar fallback visual aplicado ou falho.
+- Atualizado `README.md` com instruções de variáveis de ambiente.
+
+Arquivos impactados:
+
+- `src/app/page.tsx`
+- `src/app/api/extract-stamp/route.ts`
+- `.env.example`
+- `README.md`
+- `package.json`
+- `package-lock.json`
+
+Validações executadas:
+
+- `npm run build`
+- `npm run lint`
