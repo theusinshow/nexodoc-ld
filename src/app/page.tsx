@@ -64,6 +64,7 @@ type Tomo = {
   title: string;
   start: string;
   end: string;
+  quantity: number;
 };
 
 type GeneratedDownload = {
@@ -133,9 +134,9 @@ const initialRows: ReviewRow[] = [
 ];
 
 const initialTomos: Tomo[] = [
-  { id: 1, title: "TOMO 1", start: "01/30", end: "10/30" },
-  { id: 2, title: "TOMO 2", start: "11/30", end: "20/30" },
-  { id: 3, title: "TOMO 3", start: "21/30", end: "30/30" },
+  { id: 1, title: "TOMO 1", start: "01/30", end: "10/30", quantity: 10 },
+  { id: 2, title: "TOMO 2", start: "11/30", end: "20/30", quantity: 10 },
+  { id: 3, title: "TOMO 3", start: "21/30", end: "30/30", quantity: 10 },
 ];
 
 const checklist = [
@@ -229,6 +230,55 @@ function parseSheet(value: string): ParsedSheet | null {
 function formatSheet(number: number, total: number) {
   const width = Math.max(2, String(total).length);
   return `${String(number).padStart(width, "0")}/${total}`;
+}
+
+function buildBalancedQuantities(total: number, count: number) {
+  const safeCount = Math.max(1, Math.min(count, total));
+  const base = Math.floor(total / safeCount);
+  const remainder = total % safeCount;
+
+  return Array.from({ length: safeCount }, (_, index) => base + (index < remainder ? 1 : 0));
+}
+
+function buildTomosFromQuantities(total: number, quantities: number[]) {
+  let nextSheet = 1;
+
+  return quantities.map((quantity, index) => {
+    const endSheet = nextSheet + quantity - 1;
+    const tomo = {
+      id: index + 1,
+      title: `TOMO ${index + 1}`,
+      start: formatSheet(nextSheet, total),
+      end: formatSheet(endSheet, total),
+      quantity,
+    };
+
+    nextSheet = endSheet + 1;
+
+    return tomo;
+  });
+}
+
+function buildBalancedTomos(total: number, count: number) {
+  return buildTomosFromQuantities(total, buildBalancedQuantities(total, count));
+}
+
+function updateTomoQuantity(tomos: Tomo[], total: number, index: number, requestedQuantity: number) {
+  const minimumRemaining = tomos.length - index - 1;
+  const usedBefore = tomos.slice(0, index).reduce((sum, tomo) => sum + tomo.quantity, 0);
+  const maximum = total - usedBefore - minimumRemaining;
+  const quantity = Math.max(1, Math.min(requestedQuantity, maximum));
+  const remaining = total - usedBefore - quantity;
+  const laterQuantities = minimumRemaining > 0
+    ? buildBalancedQuantities(remaining, minimumRemaining)
+    : [];
+  const quantities = [
+    ...tomos.slice(0, index).map((tomo) => tomo.quantity),
+    quantity,
+    ...laterQuantities,
+  ];
+
+  return buildTomosFromQuantities(total, quantities);
 }
 
 function normalizeExtractedValue(value: string) {
@@ -734,6 +784,16 @@ export default function Home() {
     () => validateRows(rows, ldData.discipline, referenceTotal),
     [ldData.discipline, referenceTotal, rows],
   );
+  const tomoSheetTotal = referenceTotal ?? Math.max(
+    ...rows.map((row) => parseSheet(row.sheet)?.total ?? 0),
+    rows.length,
+    1,
+  );
+  const tomoAllocatedTotal = tomos.reduce((sum, tomo) => sum + tomo.quantity, 0);
+  const canAdvancePastTomos =
+    tomos.length > 0 &&
+    tomoAllocatedTotal === tomoSheetTotal &&
+    tomos.every((tomo) => tomo.quantity > 0);
   const rowWarningIssues = rows.flatMap((row) =>
     (validation.rowIssues[row.id] ?? []).filter((issue) => issue.severity === "warning"),
   );
@@ -748,7 +808,8 @@ export default function Home() {
   const reviewedWarnings = reviewedRowWarnings + reviewedGlobalWarningCount;
   const hasBlockingIssues = validation.blockingIssues.length > 0;
   const hasUnreviewedWarnings = reviewedWarnings < warningCount;
-  const canAdvancePastReview = !hasBlockingIssues && !hasUnreviewedWarnings;
+  const hasReferenceTotal = validation.totals.length <= 1 || referenceTotal !== null;
+  const canAdvancePastReview = !hasBlockingIssues && !hasUnreviewedWarnings && hasReferenceTotal;
 
   const generatedFiles = useMemo(
     () => [
@@ -872,6 +933,8 @@ export default function Home() {
     setReviewedGlobalWarnings([]);
     setUploadedPdfFiles(files);
     setPdfProgress(null);
+    setReferenceTotal(null);
+    setManualTotal("");
 
     try {
       const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
@@ -1024,8 +1087,7 @@ export default function Home() {
 
       if (totals.size === 1) {
         const [total] = [...totals];
-        setReferenceTotal(total);
-        setManualTotal(String(total));
+        changeReferenceTotal(total);
       }
     } catch (error) {
       setPdfReadError(error instanceof Error ? error.message : "Não foi possível ler o PDF selecionado.");
@@ -1076,8 +1138,7 @@ export default function Home() {
 
   function resetRows() {
     setRows(initialRows);
-    setReferenceTotal(30);
-    setManualTotal("30");
+    changeReferenceTotal(30);
     setReviewedGlobalWarnings([]);
   }
 
@@ -1112,6 +1173,11 @@ export default function Home() {
       return;
     }
 
+    if (step > 3 && !canAdvancePastTomos) {
+      setActiveStep(3);
+      return;
+    }
+
     setActiveStep(step);
   }
 
@@ -1120,13 +1186,28 @@ export default function Home() {
       return;
     }
 
+    if (activeStep === 3 && !canAdvancePastTomos) {
+      return;
+    }
+
     setActiveStep((step) => Math.min(steps.length - 1, step + 1));
   }
 
-  function updateTomo(id: number, key: keyof Tomo, value: string) {
-    setTomos((current) =>
-      current.map((tomo) => (tomo.id === id ? { ...tomo, [key]: value } : tomo)),
-    );
+  function changeTomoCount(count: number) {
+    setTomos(buildBalancedTomos(tomoSheetTotal, count));
+  }
+
+  function changeTomoQuantity(index: number, quantity: number) {
+    setTomos((current) => updateTomoQuantity(current, tomoSheetTotal, index, quantity));
+  }
+
+  function changeReferenceTotal(total: number | null) {
+    setReferenceTotal(total);
+    setManualTotal(total ? String(total) : "");
+
+    if (total) {
+      setTomos((current) => buildBalancedTomos(total, Math.min(current.length, total)));
+    }
   }
 
   function buildInconsistencyPayload() {
@@ -1315,7 +1396,7 @@ export default function Home() {
                 onUpdate={updateRow}
                 onSort={sortRowsBySheet}
                 onReset={resetRows}
-                onReferenceTotalChange={setReferenceTotal}
+                onReferenceTotalChange={changeReferenceTotal}
                 onManualTotalChange={setManualTotal}
                 onToggleReviewedAlert={toggleReviewedAlert}
                 onToggleGlobalWarning={toggleGlobalWarning}
@@ -1323,7 +1404,13 @@ export default function Home() {
               />
             )}
             {activeStep === 3 && (
-              <TomosStep tomos={tomos} onUpdate={updateTomo} sectionTitle={ldData.sectionTitle} />
+              <TomosStep
+                tomos={tomos}
+                totalSheets={tomoSheetTotal}
+                sectionTitle={ldData.sectionTitle}
+                onTomoCountChange={changeTomoCount}
+                onQuantityChange={changeTomoQuantity}
+              />
             )}
             {activeStep === 4 && (
               <SummaryStep
@@ -1361,7 +1448,11 @@ export default function Home() {
             <button
               type="button"
               onClick={goNext}
-              disabled={activeStep === steps.length - 1 || (activeStep === 2 && !canAdvancePastReview)}
+              disabled={
+                activeStep === steps.length - 1 ||
+                (activeStep === 2 && !canAdvancePastReview) ||
+                (activeStep === 3 && !canAdvancePastTomos)
+              }
               className="inline-flex items-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {activeStep === 2 ? "Validar e avançar" : "Avançar"}
@@ -2034,24 +2125,81 @@ function RowStatus({
 
 function TomosStep({
   tomos,
-  onUpdate,
+  totalSheets,
   sectionTitle,
+  onTomoCountChange,
+  onQuantityChange,
 }: {
   tomos: Tomo[];
-  onUpdate: (id: number, key: keyof Tomo, value: string) => void;
+  totalSheets: number;
   sectionTitle: string;
+  onTomoCountChange: (count: number) => void;
+  onQuantityChange: (index: number, quantity: number) => void;
 }) {
+  const allocatedSheets = tomos.reduce((sum, tomo) => sum + tomo.quantity, 0);
+  const maxTomos = Math.min(totalSheets, Math.max(1, Math.ceil(totalSheets / 5)));
+  const tomoCountOptions = Array.from({ length: maxTomos }, (_, index) => index + 1);
+
   return (
     <div className="space-y-4">
-      <div className="rounded-md border border-border bg-muted p-4 text-sm text-muted-foreground">
-        Título aplicado em múltiplos tomos: {sectionTitle} (TOMO N)
+      <div className="flex flex-col gap-4 border-b border-border pb-4 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p className="text-xs uppercase text-muted-foreground">Título da seção</p>
+          <p className="mt-1 text-sm font-medium">
+            {tomos.length > 1 ? `${sectionTitle} (TOMO N)` : sectionTitle}
+          </p>
+        </div>
+        <div className="text-right">
+          <p className="text-xs uppercase text-muted-foreground">Folhas alocadas</p>
+          <p className="mt-1 font-mono text-lg font-semibold">
+            {allocatedSheets}/{totalSheets}
+          </p>
+        </div>
       </div>
+      <fieldset className="space-y-2">
+        <legend className="text-sm font-medium">Quantidade de tomos</legend>
+        <div className="flex flex-wrap gap-2">
+          {tomoCountOptions.map((count) => (
+            <button
+              key={count}
+              type="button"
+              onClick={() => onTomoCountChange(count)}
+              className={`h-10 min-w-10 rounded-md border px-3 text-sm font-medium transition ${
+                tomos.length === count
+                  ? "border-accent bg-accent text-accent-foreground"
+                  : "border-border bg-background hover:bg-muted"
+              }`}
+            >
+              {count}
+            </button>
+          ))}
+        </div>
+      </fieldset>
       <div className="grid gap-3">
-        {tomos.map((tomo) => (
-          <div key={tomo.id} className="grid gap-3 border border-border bg-background p-4 md:grid-cols-[1fr_150px_150px]">
-            <Field label="Tomo" value={tomo.title} onChange={(value) => onUpdate(tomo.id, "title", value)} />
-            <Field label="Início" value={tomo.start} onChange={(value) => onUpdate(tomo.id, "start", value)} />
-            <Field label="Fim" value={tomo.end} onChange={(value) => onUpdate(tomo.id, "end", value)} />
+        {tomos.map((tomo, index) => (
+          <div key={tomo.id} className="grid items-end gap-3 border border-border bg-background p-4 md:grid-cols-[1fr_140px_180px]">
+            <div>
+              <p className="text-xs uppercase text-muted-foreground">Tomo</p>
+              <p className="mt-2 font-medium">{tomo.title}</p>
+            </div>
+            <label className="grid gap-1.5">
+              <span className="text-sm font-medium">Pranchas</span>
+              <input
+                type="number"
+                min={1}
+                max={totalSheets - (tomos.length - index - 1)}
+                value={tomo.quantity}
+                onChange={(event) => onQuantityChange(index, Number(event.target.value) || 1)}
+                disabled={index === tomos.length - 1}
+                className="h-10 rounded-md border border-border bg-background px-3 text-sm disabled:bg-muted disabled:text-muted-foreground"
+              />
+            </label>
+            <div>
+              <p className="text-sm font-medium">Intervalo</p>
+              <p className="mt-1 flex h-10 items-center rounded-md border border-border bg-muted px-3 font-mono text-sm">
+                {tomo.start} a {tomo.end}
+              </p>
+            </div>
           </div>
         ))}
       </div>

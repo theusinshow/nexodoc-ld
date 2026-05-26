@@ -16,6 +16,23 @@ A divisão deve ser:
 Automática, mas editável pelo usuário.
 ```
 
+O usuário escolhe a quantidade de tomos e a quantidade de pranchas por tomo.
+
+O sistema deve:
+
+```text
+- calcular automaticamente os intervalos de início e fim;
+- redistribuir o saldo ao alterar a quantidade de um tomo;
+- garantir que a soma dos tomos seja igual ao total de folhas de referência;
+- impedir geração com lacunas, sobreposições ou soma divergente.
+```
+
+Exemplo inválido que não deve ser aceito para 30 folhas:
+
+```text
+10 + 12 + 9 = 31
+```
+
 O sistema sugere a divisão e o usuário pode ajustar antes da geração final.
 
 ## Exemplo

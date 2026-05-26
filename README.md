@@ -106,6 +106,8 @@ Se o terminal que inicia o servidor já tiver `OPENAI_API_KEY` definida, essa va
 
 Na importação, a tela informa o arquivo e a página em processamento. Pranchas com falha ou baixa confiança podem ser reanalisadas individualmente na tabela de revisão; nessas tentativas o sistema amplia progressivamente a área visual enviada para extração.
 
+Na divisão de tomos, o usuário escolhe quantidades e o sistema recalcula os intervalos automaticamente, sempre fechando no total de folhas de referência.
+
 ## Template ODT
 
 A geração real da LD usa o template oficial em:

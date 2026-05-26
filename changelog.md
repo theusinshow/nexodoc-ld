@@ -4,6 +4,30 @@ Todas as alterações relevantes deste projeto devem ser registradas aqui.
 
 ## 2026-05-26
 
+### Tornada segura a distribuição de tomos
+
+- Substituída a edição livre de intervalos por seleção de quantidade de tomos e número de pranchas por tomo.
+- A distribuição inicial é balanceada automaticamente com base no total de folhas de referência.
+- Ao alterar a quantidade de um tomo, os tomos seguintes recebem automaticamente o saldo restante.
+- Os intervalos de início e fim passam a ser calculados pelo sistema, sem permitir soma superior ou inferior ao total.
+- O avanço para o resumo final depende de uma distribuição completa e válida.
+- A geração ODT rejeita intervalos com lacunas, sobreposições ou cobertura diferente do total declarado.
+- Atualizadas as regras documentadas de tomos e o README.
+
+Arquivos impactados:
+
+- `src/app/page.tsx`
+- `src/lib/ld-generation.ts`
+- `docs/06-tomos.md`
+- `README.md`
+- `changelog.md`
+
+Validações executadas:
+
+- `npm run lint`
+- `npm run build`
+- Teste local da API de geração com divisão inválida `10 + 12 + 9 = 31` para 30 folhas, rejeitada corretamente.
+
 ### Adicionados progresso e reanálise individual de pranchas
 
 - A importação passa a informar arquivo, página atual, total de páginas e etapa de processamento em andamento.

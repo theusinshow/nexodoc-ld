@@ -188,6 +188,38 @@ function getRowsForTomo(rows: ReviewRow[], tomo: Tomo, isSingleTomo: boolean) {
   });
 }
 
+function validateTomoRanges(tomos: Tomo[]) {
+  if (tomos.length <= 1) {
+    return;
+  }
+
+  const ranges = tomos.map((tomo) => {
+    const start = tomo.start.match(/(\d+)\s*\/\s*(\d+)/);
+    const end = tomo.end.match(/(\d+)\s*\/\s*(\d+)/);
+
+    if (!start || !end) {
+      throw new Error("A divisão dos tomos possui intervalo inválido.");
+    }
+
+    return {
+      start: Number(start[1]),
+      end: Number(end[1]),
+      total: Number(start[2]),
+      endTotal: Number(end[2]),
+    };
+  });
+  const total = ranges[0].total;
+
+  if (
+    ranges[0].start !== 1 ||
+    ranges.some((range) => range.total !== total || range.endTotal !== total || range.end < range.start) ||
+    ranges.some((range, index) => index > 0 && range.start !== ranges[index - 1].end + 1) ||
+    ranges[ranges.length - 1].end !== total
+  ) {
+    throw new Error("A divisão dos tomos deve cobrir exatamente todas as folhas, sem lacunas ou sobreposições.");
+  }
+}
+
 function buildTableRow(rowTemplate: string, row: ReviewRow) {
   return rowTemplate
     .replaceAll("{{NUMERO_FOLHA}}", escapeXml(row.sheet))
@@ -207,6 +239,7 @@ function addPageBreakStyle(contentXml: string) {
 }
 
 function buildContentXml(contentXml: string, data: LdData, rows: ReviewRow[], tomos: Tomo[]) {
+  validateTomoRanges(tomos);
   const titleRegex = /<text:p\b[^>]*>\{\{TITULO_SECAO\}\}<\/text:p>/;
   const tableRegex = /<table:table\b[\s\S]*?<\/table:table>/;
   const titleMatch = contentXml.match(titleRegex);
