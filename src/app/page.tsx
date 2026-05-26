@@ -227,6 +227,59 @@ function extractField(text: string, field: "PRANCHA" | "ARQUIVO" | "CONTEÚDO") 
   return match ? normalizeExtractedValue(match[1]) : "";
 }
 
+function normalizeSheetValue(value: string, referenceTotal: number | null) {
+  const normalized = normalizeExtractedValue(value);
+  const completeMatch = normalized.match(/\b(\d{1,3})\s*\/\s*(\d{1,3})\b/);
+
+  if (completeMatch) {
+    return formatSheet(Number(completeMatch[1]), Number(completeMatch[2]));
+  }
+
+  const singleNumberMatch = normalized.match(/\b(\d{1,3})\b/);
+
+  if (singleNumberMatch && referenceTotal) {
+    const sheetNumber = Number(singleNumberMatch[1]);
+
+    if (sheetNumber > 0 && sheetNumber <= referenceTotal) {
+      return formatSheet(sheetNumber, referenceTotal);
+    }
+  }
+
+  return "";
+}
+
+function extractFileCode(value: string, sourceText: string) {
+  const candidates = [value, sourceText];
+  const filePatterns = [
+    /\b\d{2,4}[_\-.]\d{2}[_\-.][A-Za-z]{2,}(?:[_\-.][A-Za-z0-9]+){2,}\b/i,
+    /\b\d{2,4}\s+\d{2}\s+[A-Za-z]{2,}(?:\s+[A-Za-z0-9]+){2,}\b/i,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeExtractedValue(candidate);
+
+    for (const pattern of filePatterns) {
+      const match = normalized.match(pattern);
+
+      if (match) {
+        return match[0].replace(/\s+/g, "_");
+      }
+    }
+  }
+
+  return "";
+}
+
+function cleanDescriptionValue(value: string) {
+  const normalized = normalizeExtractedValue(value);
+
+  if (/^(PRANCHA|ARQUIVO)\b/i.test(normalized)) {
+    return "";
+  }
+
+  return normalized.replace(/\s+(?:PRANCHA|ARQUIVO)\s*[:\-]?[\s\S]*$/i, "").trim();
+}
+
 function extractDisciplineFromPrancha(value: string) {
   const match = value.match(/[A-Za-z]{2,}(?:-[A-Za-z]{2,})?/);
 
@@ -264,20 +317,25 @@ function parsePdfTextToRow(
   fileName: string,
   pageNumber: number,
   id: number,
+  referenceTotal: number | null,
 ): PdfReadResult {
   const sourceText = ["PRANCHA", "ARQUIVO", "CONTEÚDO"].every((field) =>
     candidateText.toLocaleUpperCase("pt-BR").includes(field),
   )
     ? candidateText
     : fullText;
-  const sheet = extractField(sourceText, "PRANCHA");
-  const file = extractField(sourceText, "ARQUIVO");
-  const description = extractField(sourceText, "CONTEÚDO");
+  const rawSheet = extractField(sourceText, "PRANCHA");
+  const rawFile = extractField(sourceText, "ARQUIVO");
+  const rawDescription = extractField(sourceText, "CONTEÚDO");
+  const sheet = normalizeSheetValue(rawSheet, referenceTotal);
+  const file = extractFileCode(rawFile, sourceText);
+  const description = cleanDescriptionValue(rawDescription);
   const foundFields = {
-    sheet: Boolean(sheet),
+    sheet: Boolean(parseSheet(sheet)),
     file: Boolean(file),
     description: Boolean(description),
   };
+  const normalizedRawSheet = normalizeExtractedValue(rawSheet);
 
   return {
     fileName,
@@ -289,7 +347,11 @@ function parsePdfTextToRow(
       file,
       description,
       readDiscipline: extractDisciplineFromPrancha(sheet),
-      lowConfidence: !foundFields.sheet || !foundFields.file || !foundFields.description,
+      lowConfidence:
+        !foundFields.sheet ||
+        !foundFields.file ||
+        !foundFields.description ||
+        (Boolean(normalizedRawSheet) && normalizedRawSheet !== sheet),
       reviewedAlertKeys: [],
     },
     visualFallback: "not-needed",
@@ -298,7 +360,11 @@ function parsePdfTextToRow(
 
 function buildSheetFromVisualExtraction(extraction: VisualStampExtraction) {
   if (extraction.numeroFolha) {
-    return normalizeExtractedValue(extraction.numeroFolha);
+    const sheet = normalizeSheetValue(extraction.numeroFolha, extraction.total);
+
+    if (sheet) {
+      return sheet;
+    }
   }
 
   if (extraction.folha && extraction.total) {
@@ -715,7 +781,14 @@ export default function Home() {
           const expandedStampText = groupTextLines(expandedStampItems).join(" ");
           const candidateText = stampText || expandedStampText || fullText;
 
-          let pageResult = parsePdfTextToRow(candidateText, fullText, file.name, pageNumber, nextId);
+          let pageResult = parsePdfTextToRow(
+            candidateText,
+            fullText,
+            file.name,
+            pageNumber,
+            nextId,
+            referenceTotal,
+          );
 
           if (hasMissingStampFields(pageResult)) {
             try {

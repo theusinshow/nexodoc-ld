@@ -4,6 +4,25 @@ Todas as alterações relevantes deste projeto devem ser registradas aqui.
 
 ## 2026-05-26
 
+### Ajustada validação da extração textual do selo
+
+- A leitura textual deixou de aceitar qualquer texto após `PRANCHA`, `ARQUIVO` ou `CONTEÚDO` como campo válido.
+- O campo `PRANCHA` agora só é considerado localizado quando pode ser normalizado para `NN/TT`.
+- Quando o PDF traz apenas o número da prancha, o sistema usa o total de referência informado para formar `NN/TT`.
+- O campo `ARQUIVO` agora tenta localizar um código com padrão de arquivo técnico antes de aceitar o valor.
+- O campo `CONTEÚDO` agora rejeita leituras que começam com outro rótulo do selo, evitando descrições preenchidas com `PRANCHA` ou `ARQUIVO`.
+- Leituras suspeitas passam a acionar fallback visual ou entram como baixa confiança para revisão.
+
+Arquivos impactados:
+
+- `src/app/page.tsx`
+- `changelog.md`
+
+Validações executadas:
+
+- `npm run lint`
+- `npm run build`
+
 ### Criada base inicial do NexoDoc LD Lab
 
 - Criado projeto Next.js App Router com TypeScript e Tailwind CSS.
