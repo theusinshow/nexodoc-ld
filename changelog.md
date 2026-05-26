@@ -4,6 +4,24 @@ Todas as alterações relevantes deste projeto devem ser registradas aqui.
 
 ## 2026-05-26
 
+### Aumentada qualidade visual dentro de orçamento por prancha
+
+- Ampliado o recorte visual enviado para até 2400 pixels por eixo, melhorando a leitura de textos pequenos no selo.
+- Elevada a qualidade JPEG para `0.92`.
+- Aumentado o limite de saída da resposta estruturada para 8000 tokens, mantendo margem sob o orçamento solicitado de US$ 0,50 por prancha nas tarifas atuais do `gpt-5.4`.
+- Mantido `reasoning.effort: none`, pois a tarefa é extração fiel de campos e não elaboração textual.
+
+Arquivos impactados:
+
+- `src/app/api/extract-stamp/route.ts`
+- `src/app/page.tsx`
+- `changelog.md`
+
+Validações executadas:
+
+- `npm run lint`
+- `npm run build`
+
 ### Limitado custo por extração visual individual
 
 - A chamada ao `gpt-5.4` para leitura de selo agora limita a resposta a 500 tokens.

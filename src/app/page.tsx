@@ -411,7 +411,7 @@ async function renderStampCropToDataUrl(pageProxy: unknown) {
     throw new Error("Não foi possível criar o recorte do selo.");
   }
 
-  const maxImageEdge = 1200;
+  const maxImageEdge = 2400;
   const cropScale = Math.min(1, maxImageEdge / cropWidth, maxImageEdge / cropHeight);
 
   cropCanvas.width = Math.ceil(cropWidth * cropScale);
@@ -428,7 +428,7 @@ async function renderStampCropToDataUrl(pageProxy: unknown) {
     cropCanvas.height,
   );
 
-  return cropCanvas.toDataURL("image/jpeg", 0.84);
+  return cropCanvas.toDataURL("image/jpeg", 0.92);
 }
 
 async function requestVisualStampExtraction(imageDataUrl: string) {
