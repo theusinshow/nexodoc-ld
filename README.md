@@ -120,3 +120,26 @@ O template deve conter os marcadores:
 ```
 
 As propriedades do LibreOffice Writer são preenchidas automaticamente no `meta.xml` durante a geração.
+
+## Saídas finais
+
+A tela final gera:
+
+```text
+[código]_[disciplina]_ld_[revisão].odt
+[código]_[disciplina]_ld_[revisão].pdf
+[código]_[disciplina]_ld_[revisão]_inconsistencias.md, quando houver alertas
+[código]_[disciplina]_ld_[revisão].zip
+```
+
+A conversão para PDF usa LibreOffice em modo headless. No Windows, o app tenta encontrar automaticamente:
+
+```text
+C:\Program Files\LibreOffice\program\soffice.exe
+```
+
+Também é possível informar um caminho específico:
+
+```bash
+LIBREOFFICE_PATH=C:\Program Files\LibreOffice\program\soffice.exe
+```

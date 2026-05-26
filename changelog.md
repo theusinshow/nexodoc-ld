@@ -125,3 +125,29 @@ Validações executadas:
 
 - `npm run build`
 - `npm run lint`
+
+### Implementadas saídas finais em PDF, ZIP e relatório MD
+
+- Extraída a geração de ODT para `src/lib/ld-generation.ts`, permitindo reaproveitamento por múltiplas rotas.
+- Criada API route `src/app/api/generate-package/route.ts` para gerar pacote final.
+- Implementada conversão de `.odt` para `.pdf` usando LibreOffice headless.
+- Implementada busca automática por LibreOffice em comandos comuns e no caminho Windows `C:\Program Files\LibreOffice\program\soffice.exe`.
+- Adicionado suporte a `LIBREOFFICE_PATH` para configurar o binário manualmente.
+- Implementada geração de relatório `.md` de inconsistências quando houver alertas.
+- Implementada geração de `.zip` com ODT, PDF e relatório quando aplicável.
+- Atualizada tela final para gerar e oferecer downloads reais de ODT, PDF, relatório MD e ZIP.
+- Atualizado `README.md` com documentação das saídas finais e do LibreOffice headless.
+
+Arquivos impactados:
+
+- `src/lib/ld-generation.ts`
+- `src/app/api/generate-odt/route.ts`
+- `src/app/api/generate-package/route.ts`
+- `src/app/page.tsx`
+- `README.md`
+- `changelog.md`
+
+Validações executadas:
+
+- `npm run build`
+- `npm run lint`

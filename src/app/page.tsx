@@ -61,9 +61,10 @@ type Tomo = {
   end: string;
 };
 
-type GeneratedOdt = {
+type GeneratedDownload = {
   fileName: string;
   url: string;
+  kind: "odt" | "pdf" | "report" | "zip";
 };
 
 const steps = [
@@ -421,6 +422,17 @@ function fileToDataUrl(file: File) {
   });
 }
 
+function base64ToObjectUrl(base64: string, mimeType: string) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+}
+
 function compareBySheet(a: ReviewRow, b: ReviewRow) {
   const parsedA = parseSheet(a.sheet);
   const parsedB = parseSheet(b.sheet);
@@ -571,9 +583,9 @@ export default function Home() {
   const [pdfProcessing, setPdfProcessing] = useState(false);
   const [pdfReadError, setPdfReadError] = useState("");
   const [templateFile, setTemplateFile] = useState<File | null>(null);
-  const [generatedOdt, setGeneratedOdt] = useState<GeneratedOdt | null>(null);
-  const [odtGenerating, setOdtGenerating] = useState(false);
-  const [odtError, setOdtError] = useState("");
+  const [generatedDownloads, setGeneratedDownloads] = useState<GeneratedDownload[]>([]);
+  const [packageGenerating, setPackageGenerating] = useState(false);
+  const [packageError, setPackageError] = useState("");
 
   const baseName = `${ldData.projectCode}_${ldData.discipline}_ld_${ldData.revision}`;
   const validation = useMemo(
@@ -808,16 +820,39 @@ export default function Home() {
     );
   }
 
-  async function generateOdt() {
-    setOdtGenerating(true);
-    setOdtError("");
+  function buildInconsistencyPayload() {
+    return {
+      missingSheets: validation.missingSheets,
+      globalWarnings: validation.globalWarnings.map((warning) => warning.label),
+      rowWarnings: rows
+        .map((row) => {
+          const warnings = (validation.rowIssues[row.id] ?? []).filter(
+            (issue) => issue.severity === "warning",
+          );
+
+          return {
+            sheet: row.sheet,
+            file: row.file,
+            warnings: warnings.map((warning) => warning.label),
+            reviewed:
+              warnings.length > 0 &&
+              warnings.every((warning) => row.reviewedAlertKeys.includes(warning.key)),
+          };
+        })
+        .filter((row) => row.warnings.length > 0),
+    };
+  }
+
+  async function generateFinalFiles() {
+    setPackageGenerating(true);
+    setPackageError("");
 
     try {
       const templateBase64 =
         ldData.templateMode === "alternativo" && templateFile
           ? await fileToDataUrl(templateFile)
           : null;
-      const response = await fetch("/api/generate-odt", {
+      const response = await fetch("/api/generate-package", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -828,34 +863,62 @@ export default function Home() {
             sheet: row.sheet,
             file: row.file,
             description: row.description,
+            readDiscipline: row.readDiscipline,
+            lowConfidence: row.lowConfidence,
+            reviewedAlertKeys: row.reviewedAlertKeys,
           })),
           tomos,
           templateBase64,
+          inconsistencies: buildInconsistencyPayload(),
         }),
       });
 
       if (!response.ok) {
         const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(payload?.error ?? "Não foi possível gerar o ODT.");
+        throw new Error(payload?.error ?? "Não foi possível gerar os arquivos finais.");
       }
 
-      const blob = await response.blob();
-      const disposition = response.headers.get("Content-Disposition") ?? "";
-      const fileNameMatch = disposition.match(/filename="([^"]+)"/);
-      const fileName = fileNameMatch?.[1] ?? `${baseName}.odt`;
+      const payload = (await response.json()) as {
+        files: {
+          odt: { name: string; data: string };
+          pdf: { name: string; data: string };
+          report: { name: string; data: string } | null;
+          zip: { name: string; data: string };
+        };
+      };
 
-      if (generatedOdt) {
-        URL.revokeObjectURL(generatedOdt.url);
-      }
+      generatedDownloads.forEach((download) => URL.revokeObjectURL(download.url));
 
-      setGeneratedOdt({
-        fileName,
-        url: URL.createObjectURL(blob),
-      });
+      setGeneratedDownloads(
+        [
+          {
+            fileName: payload.files.odt.name,
+            kind: "odt" as const,
+            url: base64ToObjectUrl(payload.files.odt.data, "application/vnd.oasis.opendocument.text"),
+          },
+          {
+            fileName: payload.files.pdf.name,
+            kind: "pdf" as const,
+            url: base64ToObjectUrl(payload.files.pdf.data, "application/pdf"),
+          },
+          payload.files.report
+            ? {
+                fileName: payload.files.report.name,
+                kind: "report" as const,
+                url: base64ToObjectUrl(payload.files.report.data, "text/markdown"),
+              }
+            : null,
+          {
+            fileName: payload.files.zip.name,
+            kind: "zip" as const,
+            url: base64ToObjectUrl(payload.files.zip.data, "application/zip"),
+          },
+        ].filter((download): download is GeneratedDownload => Boolean(download)),
+      );
     } catch (error) {
-      setOdtError(error instanceof Error ? error.message : "Não foi possível gerar o ODT.");
+      setPackageError(error instanceof Error ? error.message : "Não foi possível gerar os arquivos finais.");
     } finally {
-      setOdtGenerating(false);
+      setPackageGenerating(false);
     }
   }
 
@@ -964,10 +1027,10 @@ export default function Home() {
             {activeStep === 5 && (
               <FinalStep
                 files={generatedFiles}
-                generatedOdt={generatedOdt}
-                generating={odtGenerating}
-                error={odtError}
-                onGenerateOdt={generateOdt}
+                downloads={generatedDownloads}
+                generating={packageGenerating}
+                error={packageError}
+                onGenerate={generateFinalFiles}
               />
             )}
           </div>
@@ -1685,45 +1748,48 @@ function SummaryGroup({ title, items }: { title: string; items: [string, string]
 
 function FinalStep({
   files,
-  generatedOdt,
+  downloads,
   generating,
   error,
-  onGenerateOdt,
+  onGenerate,
 }: {
   files: string[];
-  generatedOdt: GeneratedOdt | null;
+  downloads: GeneratedDownload[];
   generating: boolean;
   error: string;
-  onGenerateOdt: () => void;
+  onGenerate: () => void;
 }) {
+  const generatedNames = new Set(downloads.map((download) => download.fileName));
+
   return (
     <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
       <div className="space-y-3">
         <button
           type="button"
-          onClick={onGenerateOdt}
+          onClick={onGenerate}
           disabled={generating}
           className="flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-3 text-sm font-medium text-accent-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {generating ? <Loader2 size={16} className="animate-spin" /> : <FileText size={16} />}
-          Gerar ODT
+          Gerar arquivos finais
         </button>
         {error && <p className="rounded-md border border-danger bg-background p-3 text-sm text-danger">{error}</p>}
-        {generatedOdt && (
+        {downloads.map((download) => (
           <a
-            href={generatedOdt.url}
-            download={generatedOdt.fileName}
+            key={download.fileName}
+            href={download.url}
+            download={download.fileName}
             className="flex w-full items-center justify-between rounded-md border border-border bg-background px-3 py-3 text-left text-sm transition hover:bg-muted"
           >
             <span className="flex min-w-0 items-center gap-2">
-              <Download size={16} />
-              <span className="truncate font-mono">{generatedOdt.fileName}</span>
+              {download.kind === "zip" ? <FileArchive size={16} /> : <Download size={16} />}
+              <span className="truncate font-mono">{download.fileName}</span>
             </span>
             Baixar
           </a>
-        )}
+        ))}
         {files
-          .filter((file) => !file.endsWith(".odt"))
+          .filter((file) => !generatedNames.has(file))
           .map((file) => (
             <button
               key={file}
@@ -1735,7 +1801,7 @@ function FinalStep({
                 {file.endsWith(".zip") ? <FileArchive size={16} /> : <Download size={16} />}
                 <span className="truncate font-mono">{file}</span>
               </span>
-              Fase futura
+              Aguardando geração
             </button>
           ))}
       </div>
