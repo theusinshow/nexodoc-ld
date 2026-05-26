@@ -4,6 +4,28 @@ Todas as alterações relevantes deste projeto devem ser registradas aqui.
 
 ## 2026-05-26
 
+### Promovida leitura visual por IA para fluxo principal
+
+- A leitura ao anexar PDFs agora tenta extrair o selo primeiro via OpenAI visual.
+- A extração textual permanece como apoio para preencher campos quando a IA falhar ou retornar valores incompletos.
+- O recorte enviado ao modelo foi ampliado para incluir mais contexto do selo técnico.
+- O modelo padrão da API foi atualizado para `gpt-5.4`.
+- O resumo de processamento passou a indicar leitura visual por IA, em vez de fallback visual.
+- Atualizados `.env.example` e `README.md` com o modelo padrão usado no laboratório.
+
+Arquivos impactados:
+
+- `src/app/page.tsx`
+- `src/app/api/extract-stamp/route.ts`
+- `.env.example`
+- `README.md`
+- `changelog.md`
+
+Validações executadas:
+
+- `npm run lint`
+- `npm run build`
+
 ### Ajustada validação da extração textual do selo
 
 - A leitura textual deixou de aceitar qualquer texto após `PRANCHA`, `ARQUIVO` ou `CONTEÚDO` como campo válido.

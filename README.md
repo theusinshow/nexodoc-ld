@@ -93,11 +93,11 @@ npm run lint
 
 ## Variáveis de ambiente
 
-Para usar o fallback visual com OpenAI, crie um arquivo `.env.local` com:
+Para usar a leitura visual do selo com OpenAI, crie um arquivo `.env.local` com:
 
 ```bash
 OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-5.1
+OPENAI_MODEL=gpt-5.4
 ```
 
 A chave é usada apenas pela API route backend. Ela não deve ser exposta no frontend.

@@ -400,8 +400,8 @@ async function renderStampCropToDataUrl(pageProxy: unknown) {
 
   await page.render({ canvasContext: context, canvas, viewport }).promise;
 
-  const cropX = Math.floor(canvas.width * 0.55);
-  const cropY = Math.floor(canvas.height * 0.55);
+  const cropX = Math.floor(canvas.width * 0.45);
+  const cropY = Math.floor(canvas.height * 0.45);
   const cropWidth = canvas.width - cropX;
   const cropHeight = canvas.height - cropY;
   const cropCanvas = document.createElement("canvas");
@@ -447,14 +447,16 @@ async function requestVisualStampExtraction(imageDataUrl: string) {
 
 function mergeVisualExtraction(result: PdfReadResult, extraction: VisualStampExtraction): PdfReadResult {
   const sheet = buildSheetFromVisualExtraction(extraction) || result.row.sheet;
-  const file = normalizeExtractedValue(extraction.arquivo ?? "") || result.row.file;
-  const description = normalizeExtractedValue(extraction.conteudo ?? "") || result.row.description;
+  const visualFile = normalizeExtractedValue(extraction.arquivo ?? "");
+  const visualDescription = cleanDescriptionValue(extraction.conteudo ?? "");
+  const file = extractFileCode(visualFile, visualFile) || result.row.file;
+  const description = visualDescription || result.row.description;
   const readDiscipline =
     normalizeExtractedValue(extraction.disciplina ?? "") ||
     extractDisciplineFromPrancha(sheet) ||
     result.row.readDiscipline;
   const foundFields = {
-    sheet: Boolean(sheet),
+    sheet: Boolean(parseSheet(sheet)),
     file: Boolean(file),
     description: Boolean(description),
   };
@@ -781,7 +783,7 @@ export default function Home() {
           const expandedStampText = groupTextLines(expandedStampItems).join(" ");
           const candidateText = stampText || expandedStampText || fullText;
 
-          let pageResult = parsePdfTextToRow(
+          const textResult = parsePdfTextToRow(
             candidateText,
             fullText,
             file.name,
@@ -789,22 +791,31 @@ export default function Home() {
             nextId,
             referenceTotal,
           );
+          let pageResult = textResult;
+
+          try {
+            const imageDataUrl = await renderStampCropToDataUrl(page);
+            const visualExtraction = await requestVisualStampExtraction(imageDataUrl);
+            pageResult = mergeVisualExtraction(textResult, visualExtraction);
+          } catch (fallbackError) {
+            pageResult = {
+              ...textResult,
+              visualFallback: "failed",
+              visualError:
+                fallbackError instanceof Error
+                  ? fallbackError.message
+                  : "Leitura visual por IA falhou.",
+            };
+          }
 
           if (hasMissingStampFields(pageResult)) {
-            try {
-              const imageDataUrl = await renderStampCropToDataUrl(page);
-              const visualExtraction = await requestVisualStampExtraction(imageDataUrl);
-              pageResult = mergeVisualExtraction(pageResult, visualExtraction);
-            } catch (fallbackError) {
-              pageResult = {
-                ...pageResult,
-                visualFallback: "failed",
-                visualError:
-                  fallbackError instanceof Error
-                    ? fallbackError.message
-                    : "Fallback visual falhou.",
-              };
-            }
+            pageResult = {
+              ...pageResult,
+              row: {
+                ...pageResult.row,
+                lowConfidence: true,
+              },
+            };
           }
 
           nextResults.push(pageResult);
@@ -1315,11 +1326,11 @@ function PdfReadSummary({
         ) : (
           <FileSearch size={16} className="text-accent" />
         )}
-        Leitura textual de PDF
+        Leitura visual por IA
       </div>
       {processing && (
         <p className="mt-2 text-sm text-muted-foreground">
-          Processando páginas e procurando os campos fixos no texto selecionável.
+          Renderizando o selo de cada página e extraindo PRANCHA, ARQUIVO e CONTEÚDO com IA visual.
         </p>
       )}
       {error && <p className="mt-2 text-sm text-danger">{error}</p>}
@@ -1328,8 +1339,8 @@ function PdfReadSummary({
           <Metric label="Páginas lidas" value={String(results.length)} />
           <Metric label="Para revisão" value={String(reviewCount)} />
           <Metric label="Preenchidas" value={String(results.length - reviewCount)} />
-          <Metric label="Fallback visual" value={String(visualSuccessCount)} />
-          <Metric label="Fallback falhou" value={String(visualFailedCount)} />
+          <Metric label="IA visual" value={String(visualSuccessCount)} />
+          <Metric label="IA falhou" value={String(visualFailedCount)} />
         </div>
       )}
       {!processing && results.some((result) => result.visualError) && (
