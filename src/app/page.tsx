@@ -61,6 +61,11 @@ type Tomo = {
   end: string;
 };
 
+type GeneratedOdt = {
+  fileName: string;
+  url: string;
+};
+
 const steps = [
   "Dados da LD",
   "Upload de pranchas",
@@ -406,6 +411,16 @@ function mergeVisualExtraction(result: PdfReadResult, extraction: VisualStampExt
   };
 }
 
+function fileToDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error("Não foi possível ler o template alternativo."));
+    reader.readAsDataURL(file);
+  });
+}
+
 function compareBySheet(a: ReviewRow, b: ReviewRow) {
   const parsedA = parseSheet(a.sheet);
   const parsedB = parseSheet(b.sheet);
@@ -555,6 +570,10 @@ export default function Home() {
   const [pdfReadResults, setPdfReadResults] = useState<PdfReadResult[]>([]);
   const [pdfProcessing, setPdfProcessing] = useState(false);
   const [pdfReadError, setPdfReadError] = useState("");
+  const [templateFile, setTemplateFile] = useState<File | null>(null);
+  const [generatedOdt, setGeneratedOdt] = useState<GeneratedOdt | null>(null);
+  const [odtGenerating, setOdtGenerating] = useState(false);
+  const [odtError, setOdtError] = useState("");
 
   const baseName = `${ldData.projectCode}_${ldData.discipline}_ld_${ldData.revision}`;
   const validation = useMemo(
@@ -589,6 +608,10 @@ export default function Home() {
 
   function updateLdData(key: keyof LdData, value: string) {
     setLdData((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateTemplateFile(file: File | null) {
+    setTemplateFile(file);
   }
 
   function updateRow(id: number, key: keyof ReviewRow, value: string | boolean) {
@@ -785,6 +808,57 @@ export default function Home() {
     );
   }
 
+  async function generateOdt() {
+    setOdtGenerating(true);
+    setOdtError("");
+
+    try {
+      const templateBase64 =
+        ldData.templateMode === "alternativo" && templateFile
+          ? await fileToDataUrl(templateFile)
+          : null;
+      const response = await fetch("/api/generate-odt", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ldData,
+          rows: rows.map((row) => ({
+            sheet: row.sheet,
+            file: row.file,
+            description: row.description,
+          })),
+          tomos,
+          templateBase64,
+        }),
+      });
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? "Não foi possível gerar o ODT.");
+      }
+
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") ?? "";
+      const fileNameMatch = disposition.match(/filename="([^"]+)"/);
+      const fileName = fileNameMatch?.[1] ?? `${baseName}.odt`;
+
+      if (generatedOdt) {
+        URL.revokeObjectURL(generatedOdt.url);
+      }
+
+      setGeneratedOdt({
+        fileName,
+        url: URL.createObjectURL(blob),
+      });
+    } catch (error) {
+      setOdtError(error instanceof Error ? error.message : "Não foi possível gerar o ODT.");
+    } finally {
+      setOdtGenerating(false);
+    }
+  }
+
   return (
     <main className="min-h-screen">
       <header className="border-b border-border bg-surface">
@@ -837,7 +911,12 @@ export default function Home() {
 
           <div className="p-5">
             {activeStep === 0 && (
-              <LdForm data={ldData} onChange={updateLdData} />
+              <LdForm
+                data={ldData}
+                templateFile={templateFile}
+                onChange={updateLdData}
+                onTemplateFileChange={updateTemplateFile}
+              />
             )}
             {activeStep === 1 && (
               <UploadStep onFilesSelected={processPdfFiles} processing={pdfProcessing} />
@@ -882,7 +961,15 @@ export default function Home() {
                 files={generatedFiles}
               />
             )}
-            {activeStep === 5 && <FinalStep files={generatedFiles} />}
+            {activeStep === 5 && (
+              <FinalStep
+                files={generatedFiles}
+                generatedOdt={generatedOdt}
+                generating={odtGenerating}
+                error={odtError}
+                onGenerateOdt={generateOdt}
+              />
+            )}
           </div>
 
           <footer className="flex items-center justify-between border-t border-border px-5 py-4">
@@ -922,10 +1009,14 @@ function Metric({ label, value }: { label: string; value: string }) {
 
 function LdForm({
   data,
+  templateFile,
   onChange,
+  onTemplateFileChange,
 }: {
   data: LdData;
+  templateFile: File | null;
   onChange: (key: keyof LdData, value: string) => void;
+  onTemplateFileChange: (file: File | null) => void;
 }) {
   return (
     <div className="grid gap-4 md:grid-cols-2">
@@ -951,7 +1042,17 @@ function LdForm({
       {data.templateMode === "alternativo" && (
         <label className="grid gap-1.5 md:col-span-2">
           <span className="text-sm font-medium">Template alternativo (.odt)</span>
-          <input type="file" accept=".odt" className="rounded-md border border-border bg-background px-3 py-2 text-sm" />
+          <input
+            type="file"
+            accept=".odt,application/vnd.oasis.opendocument.text"
+            onChange={(event) => onTemplateFileChange(event.target.files?.[0] ?? null)}
+            className="rounded-md border border-border bg-background px-3 py-2 text-sm"
+          />
+          {templateFile && (
+            <span className="text-xs text-muted-foreground">
+              Template selecionado: {templateFile.name}
+            </span>
+          )}
         </label>
       )}
     </div>
@@ -1582,24 +1683,61 @@ function SummaryGroup({ title, items }: { title: string; items: [string, string]
   );
 }
 
-function FinalStep({ files }: { files: string[] }) {
+function FinalStep({
+  files,
+  generatedOdt,
+  generating,
+  error,
+  onGenerateOdt,
+}: {
+  files: string[];
+  generatedOdt: GeneratedOdt | null;
+  generating: boolean;
+  error: string;
+  onGenerateOdt: () => void;
+}) {
   return (
     <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
       <div className="space-y-3">
-        {files.map((file) => (
-          <button
-            key={file}
-            type="button"
-            disabled
-            className="flex w-full items-center justify-between rounded-md border border-border bg-background px-3 py-3 text-left text-sm opacity-70"
+        <button
+          type="button"
+          onClick={onGenerateOdt}
+          disabled={generating}
+          className="flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-3 text-sm font-medium text-accent-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {generating ? <Loader2 size={16} className="animate-spin" /> : <FileText size={16} />}
+          Gerar ODT
+        </button>
+        {error && <p className="rounded-md border border-danger bg-background p-3 text-sm text-danger">{error}</p>}
+        {generatedOdt && (
+          <a
+            href={generatedOdt.url}
+            download={generatedOdt.fileName}
+            className="flex w-full items-center justify-between rounded-md border border-border bg-background px-3 py-3 text-left text-sm transition hover:bg-muted"
           >
             <span className="flex min-w-0 items-center gap-2">
-              {file.endsWith(".zip") ? <FileArchive size={16} /> : <Download size={16} />}
-              <span className="truncate font-mono">{file}</span>
+              <Download size={16} />
+              <span className="truncate font-mono">{generatedOdt.fileName}</span>
             </span>
-            Mockado
-          </button>
-        ))}
+            Baixar
+          </a>
+        )}
+        {files
+          .filter((file) => !file.endsWith(".odt"))
+          .map((file) => (
+            <button
+              key={file}
+              type="button"
+              disabled
+              className="flex w-full items-center justify-between rounded-md border border-border bg-background px-3 py-3 text-left text-sm opacity-70"
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                {file.endsWith(".zip") ? <FileArchive size={16} /> : <Download size={16} />}
+                <span className="truncate font-mono">{file}</span>
+              </span>
+              Fase futura
+            </button>
+          ))}
       </div>
       <div>
         <h3 className="mb-3 font-semibold">Checklist final</h3>

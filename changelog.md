@@ -92,3 +92,36 @@ Validações executadas:
 
 - `npm run build`
 - `npm run lint`
+
+### Implementada geração real de ODT
+
+- Adicionada dependência `jszip` para manipular arquivos `.odt` como pacotes ZIP.
+- Adicionado template oficial `templates/modelo_ld_empresa.odt`.
+- Criada API route `src/app/api/generate-odt/route.ts` para gerar a LD real em `.odt`.
+- Implementado preenchimento de `meta.xml` com propriedades do LibreOffice Writer:
+  - `Info 1`: órgão/cliente;
+  - `Info 2`: código formatado;
+  - `Info 3`: Lista de documentos;
+  - `Info 4`: LISTA DE DOCUMENTOS;
+  - `Assunto`: nome da obra;
+  - `Anotações`: fase.
+- Implementada substituição dos marcadores `{{TITULO_SECAO}}`, `{{NUMERO_FOLHA}}`, `{{ARQUIVO}}` e `{{DESCRICAO}}`.
+- Implementada montagem de tomos com título específico por tomo e quebra de página entre tomos.
+- Implementado suporte a template alternativo `.odt` selecionado na tela de dados da LD.
+- Habilitado botão real de geração e download do `.odt` na tela final.
+- Mantidos PDF, ZIP e relatório como fases futuras.
+- Atualizado `README.md` com instruções sobre o template ODT.
+
+Arquivos impactados:
+
+- `src/app/api/generate-odt/route.ts`
+- `src/app/page.tsx`
+- `templates/modelo_ld_empresa.odt`
+- `README.md`
+- `package.json`
+- `package-lock.json`
+
+Validações executadas:
+
+- `npm run build`
+- `npm run lint`

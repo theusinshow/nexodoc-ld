@@ -101,3 +101,22 @@ OPENAI_MODEL=gpt-5.1
 ```
 
 A chave é usada apenas pela API route backend. Ela não deve ser exposta no frontend.
+
+## Template ODT
+
+A geração real da LD usa o template oficial em:
+
+```text
+templates/modelo_ld_empresa.odt
+```
+
+O template deve conter os marcadores:
+
+```text
+{{TITULO_SECAO}}
+{{NUMERO_FOLHA}}
+{{ARQUIVO}}
+{{DESCRICAO}}
+```
+
+As propriedades do LibreOffice Writer são preenchidas automaticamente no `meta.xml` durante a geração.
