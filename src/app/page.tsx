@@ -8,7 +8,9 @@ import {
   CircleX,
   Download,
   FileArchive,
+  FileSearch,
   FileText,
+  Loader2,
   Plus,
   RotateCcw,
   ShieldCheck,
@@ -37,6 +39,17 @@ type ReviewRow = {
   readDiscipline: string;
   lowConfidence: boolean;
   reviewedAlertKeys: string[];
+};
+
+type PdfReadResult = {
+  fileName: string;
+  pageNumber: number;
+  row: ReviewRow;
+  foundFields: {
+    sheet: boolean;
+    file: boolean;
+    description: boolean;
+  };
 };
 
 type Tomo = {
@@ -150,6 +163,17 @@ type ValidationResult = {
   missingSheets: number[];
 };
 
+type PdfTextItem = {
+  str: string;
+  transform: number[];
+};
+
+type PdfTextLine = {
+  x: number;
+  y: number;
+  text: string;
+};
+
 function parseSheet(value: string): ParsedSheet | null {
   const match = value.trim().match(/(\d+)\s*\/\s*(\d+)/);
 
@@ -166,6 +190,91 @@ function parseSheet(value: string): ParsedSheet | null {
 function formatSheet(number: number, total: number) {
   const width = Math.max(2, String(total).length);
   return `${String(number).padStart(width, "0")}/${total}`;
+}
+
+function normalizeExtractedValue(value: string) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function extractField(text: string, field: "PRANCHA" | "ARQUIVO" | "CONTEÚDO") {
+  const fieldAlternatives = ["PRANCHA", "ARQUIVO", "CONTEÚDO"].filter((name) => name !== field);
+  const stopPattern = fieldAlternatives.map(escapeRegex).join("|");
+  const pattern = new RegExp(`${field}\\s*[:\\-]?\\s*([\\s\\S]*?)(?=\\s+(?:${stopPattern})\\s*[:\\-]?|$)`, "i");
+  const match = text.match(pattern);
+
+  return match ? normalizeExtractedValue(match[1]) : "";
+}
+
+function extractDisciplineFromPrancha(value: string) {
+  const match = value.match(/[A-Za-z]{2,}(?:-[A-Za-z]{2,})?/);
+
+  return match ? match[0] : "";
+}
+
+function groupTextLines(items: PdfTextLine[]) {
+  const sortedItems = [...items].sort((a, b) => {
+    if (Math.abs(a.y - b.y) > 4) {
+      return a.y - b.y;
+    }
+
+    return a.x - b.x;
+  });
+  const lines: PdfTextLine[] = [];
+
+  for (const item of sortedItems) {
+    const currentLine = lines[lines.length - 1];
+
+    if (currentLine && Math.abs(currentLine.y - item.y) <= 4) {
+      currentLine.text = `${currentLine.text} ${item.text}`;
+      currentLine.x = Math.min(currentLine.x, item.x);
+      continue;
+    }
+
+    lines.push({ ...item });
+  }
+
+  return lines.map((line) => normalizeExtractedValue(line.text)).filter(Boolean);
+}
+
+function parsePdfTextToRow(
+  candidateText: string,
+  fullText: string,
+  fileName: string,
+  pageNumber: number,
+  id: number,
+): PdfReadResult {
+  const sourceText = ["PRANCHA", "ARQUIVO", "CONTEÚDO"].every((field) =>
+    candidateText.toLocaleUpperCase("pt-BR").includes(field),
+  )
+    ? candidateText
+    : fullText;
+  const sheet = extractField(sourceText, "PRANCHA");
+  const file = extractField(sourceText, "ARQUIVO");
+  const description = extractField(sourceText, "CONTEÚDO");
+  const foundFields = {
+    sheet: Boolean(sheet),
+    file: Boolean(file),
+    description: Boolean(description),
+  };
+
+  return {
+    fileName,
+    pageNumber,
+    foundFields,
+    row: {
+      id,
+      sheet,
+      file,
+      description,
+      readDiscipline: extractDisciplineFromPrancha(sheet),
+      lowConfidence: !foundFields.sheet || !foundFields.file || !foundFields.description,
+      reviewedAlertKeys: [],
+    },
+  };
 }
 
 function compareBySheet(a: ReviewRow, b: ReviewRow) {
@@ -314,6 +423,9 @@ export default function Home() {
   const [referenceTotal, setReferenceTotal] = useState<number | null>(30);
   const [manualTotal, setManualTotal] = useState("30");
   const [reviewedGlobalWarnings, setReviewedGlobalWarnings] = useState<string[]>([]);
+  const [pdfReadResults, setPdfReadResults] = useState<PdfReadResult[]>([]);
+  const [pdfProcessing, setPdfProcessing] = useState(false);
+  const [pdfReadError, setPdfReadError] = useState("");
 
   const baseName = `${ldData.projectCode}_${ldData.discipline}_ld_${ldData.revision}`;
   const validation = useMemo(
@@ -385,6 +497,85 @@ export default function Home() {
 
   function removeRow(id: number) {
     setRows((current) => current.filter((row) => row.id !== id));
+  }
+
+  async function processPdfFiles(fileList: FileList | File[]) {
+    const files = Array.from(fileList).filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
+
+    if (files.length === 0) {
+      setPdfReadError("Selecione ao menos um arquivo PDF.");
+      return;
+    }
+
+    setPdfProcessing(true);
+    setPdfReadError("");
+
+    try {
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+      pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+        "pdfjs-dist/legacy/build/pdf.worker.mjs",
+        import.meta.url,
+      ).toString();
+
+      const nextResults: PdfReadResult[] = [];
+      let nextId = 1;
+
+      for (const file of files) {
+        const data = await file.arrayBuffer();
+        const documentTask = pdfjs.getDocument({ data });
+        const pdf = await documentTask.promise;
+
+        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+          const page = await pdf.getPage(pageNumber);
+          const viewport = page.getViewport({ scale: 1 });
+          const textContent = await page.getTextContent();
+          const textItems = textContent.items.filter((item) => "str" in item && "transform" in item);
+          const positionedItems = textItems.map((item) => {
+            const textItem = item as PdfTextItem;
+            const [x, y] = viewport.convertToViewportPoint(textItem.transform[4], textItem.transform[5]);
+
+            return {
+              x,
+              y,
+              text: textItem.str,
+            };
+          });
+          const stampItems = positionedItems.filter(
+            (item) => item.x >= viewport.width * 0.55 && item.y >= viewport.height * 0.55,
+          );
+          const expandedStampItems = positionedItems.filter(
+            (item) => item.x >= viewport.width * 0.45 && item.y >= viewport.height * 0.45,
+          );
+          const fullText = groupTextLines(positionedItems).join(" ");
+          const stampText = groupTextLines(stampItems).join(" ");
+          const expandedStampText = groupTextLines(expandedStampItems).join(" ");
+          const candidateText = stampText || expandedStampText || fullText;
+
+          nextResults.push(parsePdfTextToRow(candidateText, fullText, file.name, pageNumber, nextId));
+          nextId += 1;
+        }
+      }
+
+      setPdfReadResults(nextResults);
+      setRows(nextResults.map((result) => result.row).sort(compareBySheet));
+      setReviewedGlobalWarnings([]);
+
+      const totals = new Set(
+        nextResults
+          .map((result) => parseSheet(result.row.sheet)?.total)
+          .filter((total): total is number => typeof total === "number"),
+      );
+
+      if (totals.size === 1) {
+        const [total] = [...totals];
+        setReferenceTotal(total);
+        setManualTotal(String(total));
+      }
+    } catch (error) {
+      setPdfReadError(error instanceof Error ? error.message : "Não foi possível ler o PDF selecionado.");
+    } finally {
+      setPdfProcessing(false);
+    }
   }
 
   function sortRowsBySheet() {
@@ -500,7 +691,16 @@ export default function Home() {
             {activeStep === 0 && (
               <LdForm data={ldData} onChange={updateLdData} />
             )}
-            {activeStep === 1 && <UploadStep />}
+            {activeStep === 1 && (
+              <UploadStep onFilesSelected={processPdfFiles} processing={pdfProcessing} />
+            )}
+            {activeStep === 1 && (
+              <PdfReadSummary
+                results={pdfReadResults}
+                processing={pdfProcessing}
+                error={pdfReadError}
+              />
+            )}
             {activeStep === 2 && (
               <ReviewTable
                 rows={rows}
@@ -633,20 +833,30 @@ function Field({
   );
 }
 
-function UploadStep() {
+function UploadStep({
+  onFilesSelected,
+  processing,
+}: {
+  onFilesSelected: (files: FileList) => void;
+  processing: boolean;
+}) {
   return (
     <div className="grid gap-4 md:grid-cols-2">
       <UploadPanel
         title="PDF único com várias pranchas"
-        description="Conjunto consolidado para leitura futura página a página."
+        description="O sistema separa as páginas e tenta extrair PRANCHA, ARQUIVO e CONTEÚDO."
+        disabled={processing}
+        onFilesSelected={onFilesSelected}
       />
       <UploadPanel
         title="Vários PDFs separados"
-        description="Arquivos individuais que serão ordenados pelo campo PRANCHA."
+        description="Arquivos individuais processados em sequência e ordenados pelo campo PRANCHA."
         multiple
+        disabled={processing}
+        onFilesSelected={onFilesSelected}
       />
       <div className="md:col-span-2 rounded-md border border-border bg-muted p-4 text-sm text-muted-foreground">
-        Nesta fase, os arquivos não são processados. A próxima etapa usa dados mockados para validar o fluxo.
+        A leitura usa apenas texto selecionável do PDF. Páginas sem campos completos entram na tabela para revisão manual.
       </div>
     </div>
   );
@@ -656,18 +866,84 @@ function UploadPanel({
   title,
   description,
   multiple = false,
+  disabled = false,
+  onFilesSelected,
 }: {
   title: string;
   description: string;
   multiple?: boolean;
+  disabled?: boolean;
+  onFilesSelected: (files: FileList) => void;
 }) {
   return (
-    <label className="flex min-h-56 cursor-pointer flex-col items-center justify-center rounded-md border border-dashed border-border bg-background p-6 text-center transition hover:bg-muted">
-      <Upload className="text-accent" size={28} />
+    <label
+      className={`flex min-h-56 flex-col items-center justify-center rounded-md border border-dashed border-border bg-background p-6 text-center transition ${
+        disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-muted"
+      }`}
+    >
+      {disabled ? (
+        <Loader2 className="animate-spin text-accent" size={28} />
+      ) : (
+        <Upload className="text-accent" size={28} />
+      )}
       <span className="mt-4 font-medium">{title}</span>
       <span className="mt-2 max-w-xs text-sm text-muted-foreground">{description}</span>
-      <input type="file" accept="application/pdf,.pdf" multiple={multiple} className="sr-only" />
+      <input
+        type="file"
+        accept="application/pdf,.pdf"
+        multiple={multiple}
+        disabled={disabled}
+        onChange={(event) => {
+          if (event.target.files) {
+            onFilesSelected(event.target.files);
+            event.target.value = "";
+          }
+        }}
+        className="sr-only"
+      />
     </label>
+  );
+}
+
+function PdfReadSummary({
+  results,
+  processing,
+  error,
+}: {
+  results: PdfReadResult[];
+  processing: boolean;
+  error: string;
+}) {
+  if (!processing && !error && results.length === 0) {
+    return null;
+  }
+
+  const reviewCount = results.filter((result) => result.row.lowConfidence).length;
+
+  return (
+    <div className="mt-4 rounded-md border border-border bg-background p-4">
+      <div className="flex items-center gap-2 text-sm font-semibold">
+        {processing ? (
+          <Loader2 size={16} className="animate-spin text-accent" />
+        ) : (
+          <FileSearch size={16} className="text-accent" />
+        )}
+        Leitura textual de PDF
+      </div>
+      {processing && (
+        <p className="mt-2 text-sm text-muted-foreground">
+          Processando páginas e procurando os campos fixos no texto selecionável.
+        </p>
+      )}
+      {error && <p className="mt-2 text-sm text-danger">{error}</p>}
+      {!processing && results.length > 0 && (
+        <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-3">
+          <Metric label="Páginas lidas" value={String(results.length)} />
+          <Metric label="Para revisão" value={String(reviewCount)} />
+          <Metric label="Preenchidas" value={String(results.length - reviewCount)} />
+        </div>
+      )}
+    </div>
   );
 }
 

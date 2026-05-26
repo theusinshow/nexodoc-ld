@@ -42,3 +42,26 @@ Validações executadas:
 ### Registrada regra obrigatória de changelog
 
 - Atualizado `CODEX.md` para exigir que toda alteração futura seja registrada em `changelog.md`.
+
+### Implementada leitura textual de PDFs
+
+- Adicionada dependência `pdfjs-dist` para extração de texto selecionável no navegador.
+- Implementado upload real de PDF único com várias páginas e de múltiplos PDFs separados.
+- Implementada leitura página a página dos PDFs enviados.
+- Implementada tentativa de extração priorizando o canto inferior direito da página, com fallback textual para a página inteira.
+- Implementada captura dos campos fixos `PRANCHA`, `ARQUIVO` e `CONTEÚDO`.
+- Implementado preenchimento automático da tabela de revisão a partir dos dados extraídos.
+- Linhas com campo ausente agora entram como baixa confiança para revisão manual.
+- Mantida normalização mínima do campo `CONTEÚDO`: junção de quebras de linha, remoção de espaços duplicados e aparo de espaços.
+- Atualizada área de upload para exibir estado de processamento e resumo de páginas lidas.
+
+Arquivos impactados:
+
+- `src/app/page.tsx`
+- `package.json`
+- `package-lock.json`
+
+Validações executadas:
+
+- `npm run build`
+- `npm run lint`
