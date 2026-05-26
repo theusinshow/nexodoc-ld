@@ -104,6 +104,8 @@ A chave é usada apenas pela API route backend. Ela não deve ser exposta no fro
 
 Se o terminal que inicia o servidor já tiver `OPENAI_API_KEY` definida, essa variável pode prevalecer sobre o arquivo `.env.local`. Ao trocar de chave durante testes locais, reinicie o servidor em um terminal sem essa variável herdada.
 
+Na importação, a tela informa o arquivo e a página em processamento. Pranchas com falha ou baixa confiança podem ser reanalisadas individualmente na tabela de revisão; nessas tentativas o sistema amplia progressivamente a área visual enviada para extração.
+
 ## Template ODT
 
 A geração real da LD usa o template oficial em:

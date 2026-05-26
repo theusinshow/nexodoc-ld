@@ -4,6 +4,31 @@ Todas as alterações relevantes deste projeto devem ser registradas aqui.
 
 ## 2026-05-26
 
+### Adicionados progresso e reanálise individual de pranchas
+
+- A importação passa a informar arquivo, página atual, total de páginas e etapa de processamento em andamento.
+- Linhas extraídas preservam a referência ao PDF e à página originais para permitir reanálise isolada.
+- Adicionado botão de reanálise por linha na tabela de revisão.
+- A reanálise visual tenta sucessivamente recorte do selo, recorte ampliado e página inteira, combinando imagem com o texto extraído.
+- Adicionada prévia do recorte efetivamente utilizado quando houver processamento visual.
+- Falhas de cota ou limite interrompem novas tentativas visuais na mesma prancha para evitar requisições redundantes.
+- A tabela identifica se os dados vieram de IA textual, IA visual ou parser local.
+- A API de extração agora aceita texto e imagem na mesma solicitação para apoiar a localização dos campos difíceis.
+
+Arquivos impactados:
+
+- `src/app/api/extract-stamp/route.ts`
+- `src/app/page.tsx`
+- `README.md`
+- `changelog.md`
+
+Validações executadas:
+
+- `npm run lint`
+- `npm run build`
+- Rota `/api/extract-stamp` testada com texto e imagem no mesmo payload, retornando JSON estruturado correto.
+- Verificação automatizada de navegador não executada: `agent-browser` e `playwright` não estão disponíveis no ambiente atual.
+
 ### Alterada estratégia para IA textual com fallback visual
 
 - A extração agora envia primeiro o texto selecionável da página ao `gpt-5.4` para identificar `PRANCHA`, `ARQUIVO` e `CONTEÚDO` em JSON estruturado.

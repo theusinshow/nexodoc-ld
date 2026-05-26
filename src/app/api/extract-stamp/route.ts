@@ -99,30 +99,28 @@ export async function POST(request: Request) {
   const client = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
   });
-  const inputContent = hasPdfText
-    ? [
-        {
-          type: "input_text" as const,
-          text: `${systemPrompt}
+  const textPrompt = hasPdfText
+    ? `${systemPrompt}
 
 O conteúdo abaixo foi extraído do PDF e pode estar fora de ordem por causa da diagramação.
 Identifique os valores associados aos rótulos do selo sem usar o nome do arquivo enviado.
 
 TEXTO EXTRAÍDO:
-${body.pdfText}`,
-        },
-      ]
-    : [
-        {
-          type: "input_text" as const,
-          text: systemPrompt,
-        },
-        {
+${body.pdfText}`
+    : systemPrompt;
+  const inputContent = [
+    {
+      type: "input_text" as const,
+      text: textPrompt,
+    },
+    ...(hasImage
+      ? [{
           type: "input_image" as const,
           image_url: body.imageDataUrl as string,
           detail: "high" as const,
-        },
-      ];
+        }]
+      : []),
+  ];
 
   try {
     const response = await client.responses.create({

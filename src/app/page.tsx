@@ -17,6 +17,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
+import Image from "next/image";
 import { useMemo, useState } from "react";
 
 type LdData = {
@@ -44,6 +45,8 @@ type ReviewRow = {
 type PdfReadResult = {
   fileName: string;
   pageNumber: number;
+  sourceFileIndex: number;
+  textForAi: string;
   row: ReviewRow;
   foundFields: {
     sheet: boolean;
@@ -52,6 +55,8 @@ type PdfReadResult = {
   };
   aiExtraction: "not-used" | "text" | "visual" | "failed";
   aiError?: string;
+  stampPreviewUrl?: string;
+  extractionAttempt?: string;
 };
 
 type Tomo = {
@@ -192,6 +197,22 @@ type VisualStampExtraction = {
   confianca: "alta" | "media" | "baixa";
 };
 
+type PdfProcessingProgress = {
+  current: number;
+  total: number;
+  fileName: string;
+  pageNumber: number;
+  status: string;
+};
+
+type StampCropMode = "normal" | "expanded" | "full-page";
+
+const stampCropModes: Array<{ mode: StampCropMode; label: string }> = [
+  { mode: "normal", label: "recorte do selo" },
+  { mode: "expanded", label: "recorte ampliado" },
+  { mode: "full-page", label: "pagina inteira" },
+];
+
 function parseSheet(value: string): ParsedSheet | null {
   const match = value.trim().match(/(\d+)\s*\/\s*(\d+)/);
 
@@ -317,6 +338,8 @@ function parsePdfTextToRow(
   fileName: string,
   pageNumber: number,
   id: number,
+  sourceFileIndex: number,
+  textForAi: string,
   referenceTotal: number | null,
 ): PdfReadResult {
   const sourceText = ["PRANCHA", "ARQUIVO", "CONTEÚDO"].every((field) =>
@@ -340,6 +363,8 @@ function parsePdfTextToRow(
   return {
     fileName,
     pageNumber,
+    sourceFileIndex,
+    textForAi,
     foundFields,
     row: {
       id,
@@ -378,7 +403,7 @@ function hasMissingStampFields(result: PdfReadResult) {
   return !result.foundFields.sheet || !result.foundFields.file || !result.foundFields.description;
 }
 
-async function renderStampCropToDataUrl(pageProxy: unknown) {
+async function renderStampCropToDataUrl(pageProxy: unknown, mode: StampCropMode) {
   const page = pageProxy as {
   getViewport: (options: { scale: number }) => { width: number; height: number };
   render: (options: {
@@ -400,8 +425,14 @@ async function renderStampCropToDataUrl(pageProxy: unknown) {
 
   await page.render({ canvasContext: context, canvas, viewport }).promise;
 
-  const cropX = Math.floor(canvas.width * 0.5);
-  const cropY = Math.floor(canvas.height * 0.55);
+  const cropBounds =
+    mode === "normal"
+      ? { x: 0.55, y: 0.55 }
+      : mode === "expanded"
+        ? { x: 0.4, y: 0.4 }
+        : { x: 0, y: 0 };
+  const cropX = Math.floor(canvas.width * cropBounds.x);
+  const cropY = Math.floor(canvas.height * cropBounds.y);
   const cropWidth = canvas.width - cropX;
   const cropHeight = canvas.height - cropY;
   const cropCanvas = document.createElement("canvas");
@@ -428,16 +459,32 @@ async function renderStampCropToDataUrl(pageProxy: unknown) {
     cropCanvas.height,
   );
 
-  return cropCanvas.toDataURL("image/jpeg", 0.92);
+  const previewCanvas = document.createElement("canvas");
+  const previewContext = previewCanvas.getContext("2d");
+
+  if (!previewContext) {
+    throw new Error("Não foi possível criar a prévia do selo.");
+  }
+
+  const previewWidth = Math.min(320, cropCanvas.width);
+  const previewScale = previewWidth / cropCanvas.width;
+  previewCanvas.width = previewWidth;
+  previewCanvas.height = Math.ceil(cropCanvas.height * previewScale);
+  previewContext.drawImage(cropCanvas, 0, 0, previewCanvas.width, previewCanvas.height);
+
+  return {
+    imageDataUrl: cropCanvas.toDataURL("image/jpeg", 0.92),
+    previewDataUrl: previewCanvas.toDataURL("image/jpeg", 0.76),
+  };
 }
 
-async function requestVisualStampExtraction(imageDataUrl: string) {
+async function requestVisualStampExtraction(imageDataUrl: string, pdfText: string) {
   const response = await fetch("/api/extract-stamp", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ imageDataUrl }),
+    body: JSON.stringify({ imageDataUrl, pdfText }),
   });
 
   if (!response.ok) {
@@ -674,6 +721,9 @@ export default function Home() {
   const [pdfReadResults, setPdfReadResults] = useState<PdfReadResult[]>([]);
   const [pdfProcessing, setPdfProcessing] = useState(false);
   const [pdfReadError, setPdfReadError] = useState("");
+  const [pdfProgress, setPdfProgress] = useState<PdfProcessingProgress | null>(null);
+  const [uploadedPdfFiles, setUploadedPdfFiles] = useState<File[]>([]);
+  const [reprocessingRowId, setReprocessingRowId] = useState<number | null>(null);
   const [templateFile, setTemplateFile] = useState<File | null>(null);
   const [generatedDownloads, setGeneratedDownloads] = useState<GeneratedDownload[]>([]);
   const [packageGenerating, setPackageGenerating] = useState(false);
@@ -755,6 +805,58 @@ export default function Home() {
     setRows((current) => current.filter((row) => row.id !== id));
   }
 
+  async function extractWithProgressiveVision(
+    page: unknown,
+    textResult: PdfReadResult,
+    onAttempt?: (status: string) => void,
+  ) {
+    let lastResult = textResult;
+    let lastError = "";
+
+    for (const attempt of stampCropModes) {
+      onAttempt?.(`IA visual: ${attempt.label}`);
+      let previewDataUrl: string | undefined;
+
+      try {
+        const crop = await renderStampCropToDataUrl(page, attempt.mode);
+        previewDataUrl = crop.previewDataUrl;
+        const extraction = await requestVisualStampExtraction(crop.imageDataUrl, textResult.textForAi);
+        const merged = {
+          ...mergeAiExtraction(textResult, extraction, "visual"),
+          stampPreviewUrl: crop.previewDataUrl,
+          extractionAttempt: attempt.label,
+        };
+
+        lastResult = merged;
+
+        if (!hasMissingStampFields(merged)) {
+          return merged;
+        }
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : "Leitura visual por IA falhou.";
+        lastResult = {
+          ...lastResult,
+          stampPreviewUrl: previewDataUrl ?? lastResult.stampPreviewUrl,
+          extractionAttempt: attempt.label,
+        };
+
+        if (/cota|billing|limitou temporariamente/i.test(lastError)) {
+          break;
+        }
+      }
+    }
+
+    return {
+      ...lastResult,
+      aiExtraction: "failed" as const,
+      aiError: lastError || "A IA não localizou todos os campos obrigatórios.",
+      row: {
+        ...lastResult.row,
+        lowConfidence: true,
+      },
+    };
+  }
+
   async function processPdfFiles(fileList: FileList | File[]) {
     const files = Array.from(fileList).filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
 
@@ -768,6 +870,8 @@ export default function Home() {
     setPdfReadResults([]);
     setRows([]);
     setReviewedGlobalWarnings([]);
+    setUploadedPdfFiles(files);
+    setPdfProgress(null);
 
     try {
       const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
@@ -776,15 +880,38 @@ export default function Home() {
         import.meta.url,
       ).toString();
 
-      const nextResults: PdfReadResult[] = [];
-      let nextId = 1;
+      const documents = [];
+      let totalPages = 0;
 
-      for (const file of files) {
+      for (const [fileIndex, file] of files.entries()) {
+        setPdfProgress({
+          current: 0,
+          total: 0,
+          fileName: file.name,
+          pageNumber: 0,
+          status: "Abrindo PDF",
+        });
         const data = await file.arrayBuffer();
         const documentTask = pdfjs.getDocument({ data });
         const pdf = await documentTask.promise;
 
+        documents.push({ file, fileIndex, pdf });
+        totalPages += pdf.numPages;
+      }
+
+      const nextResults: PdfReadResult[] = [];
+      let nextId = 1;
+
+      for (const { file, fileIndex, pdf } of documents) {
         for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+          const current = nextResults.length + 1;
+          setPdfProgress({
+            current,
+            total: totalPages,
+            fileName: file.name,
+            pageNumber,
+            status: "Extraindo texto da página",
+          });
           const page = await pdf.getPage(pageNumber);
           const viewport = page.getViewport({ scale: 1 });
           const textContent = await page.getTextContent();
@@ -826,6 +953,8 @@ export default function Home() {
             file.name,
             pageNumber,
             nextId,
+            fileIndex,
+            textForAi,
             referenceTotal,
           );
           let pageResult = textResult;
@@ -833,6 +962,13 @@ export default function Home() {
 
           try {
             if (textForAi) {
+              setPdfProgress({
+                current,
+                total: totalPages,
+                fileName: file.name,
+                pageNumber,
+                status: "Interpretando texto com IA",
+              });
               const textExtraction = await requestTextStampExtraction(textForAi);
               pageResult = mergeAiExtraction(textResult, textExtraction, "text");
             }
@@ -843,20 +979,13 @@ export default function Home() {
                 : "Leitura textual por IA falhou.";
           }
 
-          if (hasMissingStampFields(pageResult)) {
-            try {
-              const imageDataUrl = await renderStampCropToDataUrl(page);
-              const visualExtraction = await requestVisualStampExtraction(imageDataUrl);
-              pageResult = mergeAiExtraction(textResult, visualExtraction, "visual");
-            } catch (visualError) {
-              const message =
-                visualError instanceof Error
-                  ? visualError.message
-                  : "Leitura visual por IA falhou.";
+          if (hasMissingStampFields(pageResult) || pageResult.row.lowConfidence) {
+            pageResult = await extractWithProgressiveVision(page, textResult, (status) => {
+              setPdfProgress({ current, total: totalPages, fileName: file.name, pageNumber, status });
+            });
 
-              throw new Error(
-                `A leitura por IA falhou em ${file.name}, página ${pageNumber}: ${textAiError || message}`,
-              );
+            if (textAiError && pageResult.aiExtraction === "failed") {
+              pageResult = { ...pageResult, aiError: textAiError };
             }
           } else if (textAiError) {
             pageResult = {
@@ -877,6 +1006,8 @@ export default function Home() {
           }
 
           nextResults.push(pageResult);
+          setPdfReadResults([...nextResults]);
+          setRows(nextResults.map((result) => result.row).sort(compareBySheet));
           nextId += 1;
         }
       }
@@ -900,6 +1031,42 @@ export default function Home() {
       setPdfReadError(error instanceof Error ? error.message : "Não foi possível ler o PDF selecionado.");
     } finally {
       setPdfProcessing(false);
+      setPdfProgress(null);
+    }
+  }
+
+  async function reprocessRow(id: number) {
+    const result = pdfReadResults.find((item) => item.row.id === id);
+    const file = result ? uploadedPdfFiles[result.sourceFileIndex] : null;
+
+    if (!result || !file) {
+      setPdfReadError("A página original desta linha não está disponível para reanálise.");
+      return;
+    }
+
+    setReprocessingRowId(id);
+    setPdfReadError("");
+
+    try {
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+      pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+        "pdfjs-dist/legacy/build/pdf.worker.mjs",
+        import.meta.url,
+      ).toString();
+      const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+      const page = await pdf.getPage(result.pageNumber);
+      const updated = await extractWithProgressiveVision(page, result);
+
+      setPdfReadResults((current) =>
+        current.map((item) => (item.row.id === id ? updated : item)),
+      );
+      setRows((current) =>
+        current.map((row) => (row.id === id ? updated.row : row)).sort(compareBySheet),
+      );
+    } catch (error) {
+      setPdfReadError(error instanceof Error ? error.message : "Não foi possível reanalisar a prancha.");
+    } finally {
+      setReprocessingRowId(null);
     }
   }
 
@@ -1131,6 +1298,7 @@ export default function Home() {
                 results={pdfReadResults}
                 processing={pdfProcessing}
                 error={pdfReadError}
+                progress={pdfProgress}
               />
             )}
             {activeStep === 2 && (
@@ -1140,6 +1308,8 @@ export default function Home() {
                 manualTotal={manualTotal}
                 validation={validation}
                 reviewedGlobalWarnings={reviewedGlobalWarnings}
+                readResults={pdfReadResults}
+                reprocessingRowId={reprocessingRowId}
                 onAdd={addRow}
                 onRemove={removeRow}
                 onUpdate={updateRow}
@@ -1149,6 +1319,7 @@ export default function Home() {
                 onManualTotalChange={setManualTotal}
                 onToggleReviewedAlert={toggleReviewedAlert}
                 onToggleGlobalWarning={toggleGlobalWarning}
+                onReprocess={reprocessRow}
               />
             )}
             {activeStep === 3 && (
@@ -1310,7 +1481,7 @@ function UploadStep({
         onFilesSelected={onFilesSelected}
       />
       <div className="md:col-span-2 rounded-md border border-border bg-muted p-4 text-sm text-muted-foreground">
-        A leitura usa apenas texto selecionável do PDF. Páginas sem campos completos entram na tabela para revisão manual.
+        A extração interpreta o texto do PDF e aplica leitura visual progressiva quando algum campo exigir confirmação.
       </div>
     </div>
   );
@@ -1363,10 +1534,12 @@ function PdfReadSummary({
   results,
   processing,
   error,
+  progress,
 }: {
   results: PdfReadResult[];
   processing: boolean;
   error: string;
+  progress: PdfProcessingProgress | null;
 }) {
   if (!processing && !error && results.length === 0) {
     return null;
@@ -1388,9 +1561,31 @@ function PdfReadSummary({
         Extração por IA
       </div>
       {processing && (
-        <p className="mt-2 text-sm text-muted-foreground">
-          Interpretando o texto extraído do PDF; a leitura visual é usada apenas quando necessário.
-        </p>
+        <div className="mt-3 space-y-2">
+          <div className="flex items-center justify-between gap-4 text-sm">
+            <span className="truncate text-muted-foreground">
+              {progress?.fileName
+                ? `${progress.fileName}${progress.pageNumber ? `, página ${progress.pageNumber}` : ""}`
+                : "Preparando arquivos"}
+            </span>
+            {progress?.total ? (
+              <span className="shrink-0 font-mono text-xs font-semibold">
+                {progress.current}/{progress.total}
+              </span>
+            ) : null}
+          </div>
+          <div className="h-2 overflow-hidden rounded-sm bg-muted">
+            <div
+              className="h-full bg-accent transition-[width] duration-300"
+              style={{
+                width: progress?.total ? `${Math.max(4, (progress.current / progress.total) * 100)}%` : "4%",
+              }}
+            />
+          </div>
+          <p className="text-sm text-muted-foreground">
+            {progress?.status ?? "Preparando leitura"}.
+          </p>
+        </div>
       )}
       {error && <p className="mt-2 text-sm text-danger">{error}</p>}
       {!processing && results.length > 0 && (
@@ -1424,6 +1619,8 @@ function ReviewTable({
   manualTotal,
   validation,
   reviewedGlobalWarnings,
+  readResults,
+  reprocessingRowId,
   onAdd,
   onRemove,
   onUpdate,
@@ -1433,12 +1630,15 @@ function ReviewTable({
   onManualTotalChange,
   onToggleReviewedAlert,
   onToggleGlobalWarning,
+  onReprocess,
 }: {
   rows: ReviewRow[];
   referenceTotal: number | null;
   manualTotal: string;
   validation: ValidationResult;
   reviewedGlobalWarnings: string[];
+  readResults: PdfReadResult[];
+  reprocessingRowId: number | null;
   onAdd: () => void;
   onRemove: (id: number) => void;
   onUpdate: (id: number, key: keyof ReviewRow, value: string | boolean) => void;
@@ -1448,6 +1648,7 @@ function ReviewTable({
   onManualTotalChange: (value: string) => void;
   onToggleReviewedAlert: (rowId: number, key: string, checked: boolean) => void;
   onToggleGlobalWarning: (key: string, checked: boolean) => void;
+  onReprocess: (rowId: number) => void;
 }) {
   const warningIssues = rows.flatMap((row) =>
     (validation.rowIssues[row.id] ?? []).filter((issue) => issue.severity === "warning"),
@@ -1530,19 +1731,24 @@ function ReviewTable({
         </button>
       </div>
       <div className="overflow-x-auto border border-border">
-        <table className="w-full min-w-[1080px] border-collapse text-sm">
+        <table className="w-full min-w-[1240px] border-collapse text-sm">
           <thead className="bg-surface-strong text-left text-xs uppercase tracking-[0.08em] text-muted-foreground">
             <tr>
               <th className="w-28 border-b border-border px-3 py-3">Nº da folha</th>
               <th className="w-52 border-b border-border px-3 py-3">Arquivos</th>
               <th className="border-b border-border px-3 py-3">Descrição</th>
+              <th className="w-44 border-b border-border px-3 py-3">Selo</th>
               <th className="w-40 border-b border-border px-3 py-3">Leitura</th>
               <th className="w-56 border-b border-border px-3 py-3">Status</th>
               <th className="w-24 border-b border-border px-3 py-3">Ações</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
+            {rows.map((row) => {
+              const result = readResults.find((item) => item.row.id === row.id);
+              const reprocessing = reprocessingRowId === row.id;
+
+              return (
               <tr key={row.id} className="border-b border-border last:border-b-0">
                 <td className="px-3 py-3 align-top">
                   <CellInput value={row.sheet} onChange={(value) => onUpdate(row.id, "sheet", value)} />
@@ -1556,6 +1762,25 @@ function ReviewTable({
                     onChange={(event) => onUpdate(row.id, "description", event.target.value)}
                     className="min-h-20 w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm"
                   />
+                </td>
+                <td className="px-3 py-3 align-top">
+                  {result?.stampPreviewUrl ? (
+                    <div className="space-y-2">
+                      <Image
+                        src={result.stampPreviewUrl}
+                        alt={`Recorte analisado de ${result.fileName}, página ${result.pageNumber}`}
+                        width={160}
+                        height={80}
+                        unoptimized
+                        className="h-20 w-40 rounded-sm border border-border bg-background object-contain"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        {result.extractionAttempt ?? "Recorte analisado"}
+                      </p>
+                    </div>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">Somente texto</span>
+                  )}
                 </td>
                 <td className="px-3 py-3 align-top">
                   <div className="space-y-3">
@@ -1576,6 +1801,11 @@ function ReviewTable({
                       />
                       Baixa confiança
                     </label>
+                    {result && (
+                      <p className="text-xs text-muted-foreground">
+                        Origem: {result.aiExtraction === "text" ? "IA textual" : result.aiExtraction === "visual" ? "IA visual" : result.aiExtraction === "failed" ? "falha na IA" : "parser local"}
+                      </p>
+                    )}
                   </div>
                 </td>
                 <td className="px-3 py-3 align-top">
@@ -1586,18 +1816,33 @@ function ReviewTable({
                   />
                 </td>
                 <td className="px-3 py-3 align-top">
-                  <button
-                    type="button"
-                    onClick={() => onRemove(row.id)}
-                    className="inline-flex size-9 items-center justify-center rounded-md border border-border text-muted-foreground transition hover:bg-muted hover:text-danger"
-                    aria-label="Excluir linha"
-                    title="Excluir linha"
-                  >
-                    <Trash2 size={16} />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {result && (
+                      <button
+                        type="button"
+                        onClick={() => onReprocess(row.id)}
+                        disabled={reprocessing}
+                        className="inline-flex size-9 items-center justify-center rounded-md border border-border text-muted-foreground transition hover:bg-muted hover:text-foreground disabled:opacity-50"
+                        aria-label="Reanalisar prancha"
+                        title="Reanalisar prancha"
+                      >
+                        {reprocessing ? <Loader2 size={16} className="animate-spin" /> : <RotateCcw size={16} />}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => onRemove(row.id)}
+                      className="inline-flex size-9 items-center justify-center rounded-md border border-border text-muted-foreground transition hover:bg-muted hover:text-danger"
+                      aria-label="Excluir linha"
+                      title="Excluir linha"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
