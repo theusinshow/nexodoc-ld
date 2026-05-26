@@ -4,6 +4,24 @@ Todas as alterações relevantes deste projeto devem ser registradas aqui.
 
 ## 2026-05-26
 
+### Reduzido custo da imagem enviada para leitura visual
+
+- Confirmado por diagnóstico que a nova chave aceita chamadas textuais e visuais no projeto `NexoDoc-ld`.
+- O recorte do selo enviado à OpenAI agora tem dimensão máxima limitada a 1800 pixels por eixo.
+- A imagem do selo passou a ser enviada em JPEG com compressão controlada, reduzindo carga por prancha sem remover a região útil.
+- A mensagem de erro diferencia falta de cota de limitação temporária de chamadas visuais.
+
+Arquivos impactados:
+
+- `src/app/page.tsx`
+- `src/app/api/extract-stamp/route.ts`
+- `changelog.md`
+
+Validações executadas:
+
+- `npm run lint`
+- `npm run build`
+
 ### Exibido erro explícito quando a IA visual não tem cota
 
 - A rota de extração do selo agora captura erros da OpenAI e retorna JSON legível para o frontend.

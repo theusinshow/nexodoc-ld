@@ -136,13 +136,15 @@ export async function POST(request: Request) {
     };
     const status = apiError.status ?? 500;
     const isQuotaError =
-      status === 429 ||
       apiError.code === "insufficient_quota" ||
       apiError.type === "insufficient_quota";
+    const isRateLimitError = status === 429 && !isQuotaError;
     const message = isQuotaError
       ? "A OpenAI foi chamada, mas a chave configurada está sem cota ou billing disponível."
+      : isRateLimitError
+        ? "A OpenAI foi chamada, mas limitou temporariamente a leitura visual. Tente novamente com menos páginas por vez."
       : apiError.message ?? "Falha ao chamar a OpenAI para ler o selo.";
 
-    return NextResponse.json({ error: message }, { status });
+    return NextResponse.json({ error: message, code: apiError.code ?? apiError.type ?? null }, { status });
   }
 }
