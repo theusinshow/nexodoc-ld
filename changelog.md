@@ -4,6 +4,24 @@ Todas as alterações relevantes deste projeto devem ser registradas aqui.
 
 ## 2026-05-26
 
+### Exibido erro explícito quando a IA visual não tem cota
+
+- A rota de extração do selo agora captura erros da OpenAI e retorna JSON legível para o frontend.
+- Erros `429 insufficient_quota` passam a informar que a chave foi chamada, mas está sem cota ou billing disponível.
+- O processamento de PDFs deixa de montar tabela com fallback textual ruim quando a leitura visual por IA falha e os campos textuais não são confiáveis.
+- Mantido fallback textual apenas quando ele contém campos mínimos válidos.
+
+Arquivos impactados:
+
+- `src/app/api/extract-stamp/route.ts`
+- `src/app/page.tsx`
+- `changelog.md`
+
+Validações executadas:
+
+- `npm run lint`
+- `npm run build`
+
 ### Promovida leitura visual por IA para fluxo principal
 
 - A leitura ao anexar PDFs agora tenta extrair o selo primeiro via OpenAI visual.

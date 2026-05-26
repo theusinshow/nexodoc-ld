@@ -798,13 +798,21 @@ export default function Home() {
             const visualExtraction = await requestVisualStampExtraction(imageDataUrl);
             pageResult = mergeVisualExtraction(textResult, visualExtraction);
           } catch (fallbackError) {
+            const visualError =
+              fallbackError instanceof Error
+                ? fallbackError.message
+                : "Leitura visual por IA falhou.";
+
+            if (hasMissingStampFields(textResult)) {
+              throw new Error(
+                `A leitura visual por IA falhou em ${file.name}, página ${pageNumber}: ${visualError}`,
+              );
+            }
+
             pageResult = {
               ...textResult,
               visualFallback: "failed",
-              visualError:
-                fallbackError instanceof Error
-                  ? fallbackError.message
-                  : "Leitura visual por IA falhou.",
+              visualError,
             };
           }
 

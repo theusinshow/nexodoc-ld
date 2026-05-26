@@ -95,35 +95,54 @@ export async function POST(request: Request) {
     apiKey: process.env.OPENAI_API_KEY,
   });
 
-  const response = await client.responses.create({
-    model: process.env.OPENAI_MODEL ?? "gpt-5.4",
-    input: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "input_text",
-            text: systemPrompt,
-          },
-          {
-            type: "input_image",
-            image_url: imageDataUrl,
-            detail: "high",
-          },
-        ],
+  try {
+    const response = await client.responses.create({
+      model: process.env.OPENAI_MODEL ?? "gpt-5.4",
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: systemPrompt,
+            },
+            {
+              type: "input_image",
+              image_url: imageDataUrl,
+              detail: "high",
+            },
+          ],
+        },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "ld_stamp_extraction",
+          strict: true,
+          schema: extractionSchema,
+        },
       },
-    ],
-    text: {
-      format: {
-        type: "json_schema",
-        name: "ld_stamp_extraction",
-        strict: true,
-        schema: extractionSchema,
-      },
-    },
-  });
+    });
 
-  const parsed = JSON.parse(response.output_text) as StampExtraction;
+    const parsed = JSON.parse(response.output_text) as StampExtraction;
 
-  return NextResponse.json(parsed);
+    return NextResponse.json(parsed);
+  } catch (error) {
+    const apiError = error as {
+      status?: number;
+      code?: string;
+      type?: string;
+      message?: string;
+    };
+    const status = apiError.status ?? 500;
+    const isQuotaError =
+      status === 429 ||
+      apiError.code === "insufficient_quota" ||
+      apiError.type === "insufficient_quota";
+    const message = isQuotaError
+      ? "A OpenAI foi chamada, mas a chave configurada está sem cota ou billing disponível."
+      : apiError.message ?? "Falha ao chamar a OpenAI para ler o selo.";
+
+    return NextResponse.json({ error: message }, { status });
+  }
 }
