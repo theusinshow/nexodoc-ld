@@ -107,16 +107,20 @@ npm run test
 
 ## Variáveis de ambiente
 
-Para usar a extração estruturada do selo com OpenAI, por texto do PDF e fallback visual, crie um arquivo `.env.local` com:
+Para usar a extração estruturada visual do selo com OpenAI e fallback automático no Xiaomi MiMo, crie um arquivo `.env.local` com:
 
 ```bash
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-5.4
+MIMO_API_KEY=sk-...
+MIMO_MODEL=mimo-v2.5
 ```
 
-A chave é usada apenas pela API route backend. Ela não deve ser exposta no frontend.
+As chaves são usadas apenas pela API route backend. Elas não devem ser expostas no frontend.
 
-Se o terminal que inicia o servidor já tiver `OPENAI_API_KEY` definida, essa variável pode prevalecer sobre o arquivo `.env.local`. Ao trocar de chave durante testes locais, reinicie o servidor em um terminal sem essa variável herdada.
+Se o terminal que inicia o servidor já tiver `OPENAI_API_KEY` ou `MIMO_API_KEY` definida, essa variável pode prevalecer sobre o arquivo `.env.local`. Ao trocar de chave durante testes locais, reinicie o servidor em um terminal sem essa variável herdada.
+
+O endpoint tenta a OpenAI primeiro. Quando a chamada falha, tenta `mimo-v2.5`, que aceita a imagem Base64 do recorte do selo pela API compatível com OpenAI da Xiaomi.
 
 Na importação, a tela informa o arquivo e a página em processamento. Pranchas com falha ou baixa confiança podem ser reanalisadas individualmente na tabela de revisão; nessas tentativas o sistema amplia progressivamente a área visual enviada para extração.
 

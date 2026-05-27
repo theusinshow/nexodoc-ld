@@ -8,7 +8,10 @@ Todas as alterações relevantes deste projeto devem ser registradas aqui.
 
 - A análise de página passou a priorizar a IA visual do selo, mantendo o texto extraído apenas como contexto auxiliar da região do selo.
 - Adicionado timeout de 10 segundos por chamada visual para evitar que uma prancha trave o lote inteiro.
-- A análise completa agora processa até 4 páginas em paralelo.
+- A análise completa processa até 5 páginas visualmente em paralelo, conforme capacidade escolhida para a operação.
+- Em respostas de rate limit ou timeout, a página não dispara novas tentativas de recorte no mesmo processamento.
+- Falhas de IA deixam de ser armazenadas ou reaproveitadas do cache e lotes totalmente recusados pela API interrompem a análise sem criar linhas vazias.
+- Adicionado fallback visual no Xiaomi MiMo `mimo-v2.5` quando a chamada principal à OpenAI falha, com identificação do provedor na revisão.
 - Adicionado cache em memória por arquivo, tamanho, data de modificação e página, reaproveitando resultados já lidos na mesma sessão.
 - A pré-análise da primeira página passou a usar o mesmo caminho de análise visual-first da análise completa.
 - O texto enviado como apoio à IA foi reduzido para regiões do selo, sem incluir a página completa no caminho principal.

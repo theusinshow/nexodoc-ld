@@ -56,6 +56,7 @@ type PdfReadResult = {
     description: boolean;
   };
   aiExtraction: "not-used" | "text" | "visual" | "failed";
+  extractionProvider?: "openai" | "mimo";
   aiError?: string;
   stampPreviewUrl?: string;
   stampImageUrl?: string;
@@ -171,6 +172,7 @@ type VisualStampExtraction = {
   arquivo: string | null;
   conteudo: string | null;
   confianca: "alta" | "media" | "baixa";
+  provider?: "openai" | "mimo";
 };
 
 type PdfProcessingProgress = {
@@ -194,6 +196,8 @@ const stampCropModes: Array<{ mode: StampCropMode; label: string }> = [
   { mode: "expanded", label: "recorte ampliado" },
   { mode: "full-page", label: "pagina inteira" },
 ];
+
+const maxConcurrentVisualPages = 5;
 
 function normalizeExtractedValue(value: string) {
   return value.replace(/\s+/g, " ").trim();
@@ -367,8 +371,30 @@ function hasMissingStampFields(result: PdfReadResult) {
   return !result.foundFields.sheet || !result.foundFields.file || !result.foundFields.description;
 }
 
+function describeExtractionSource(result: PdfReadResult) {
+  if (result.aiExtraction === "failed") {
+    return "Falha na IA";
+  }
+
+  if (result.aiExtraction === "not-used") {
+    return "Parser local";
+  }
+
+  const method = result.aiExtraction === "visual" ? "visual" : "textual";
+  const provider = result.extractionProvider === "mimo" ? "MiMo" : "OpenAI";
+
+  return `IA ${method} (${provider})`;
+}
+
 function getErrorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
+}
+
+function isProviderUnavailable(result: PdfReadResult) {
+  return (
+    result.aiExtraction === "failed" &&
+    /cota|billing|limitou temporariamente|rate limit|429/i.test(result.aiError ?? "")
+  );
 }
 
 function getPdfPageCacheKey(file: File, pageNumber: number) {
@@ -560,6 +586,7 @@ function mergeAiExtraction(
     ...result,
     foundFields,
     aiExtraction: source,
+    extractionProvider: extraction.provider,
     row: {
       ...result.row,
       sheet,
@@ -743,7 +770,7 @@ export default function Home() {
           extractionAttempt: attempt.label,
         };
 
-        if (/cota|billing|limitou temporariamente/i.test(lastError)) {
+        if (/cota|billing|limitou temporariamente|rate limit|429|tempo limite/i.test(lastError)) {
           break;
         }
       }
@@ -780,7 +807,9 @@ export default function Home() {
     const cacheKey = getPdfPageCacheKey(file, pageNumber);
     const cached = pdfReadCache.current.get(cacheKey);
 
-    if (cached) {
+    if (cached?.aiExtraction === "failed") {
+      pdfReadCache.current.delete(cacheKey);
+    } else if (cached) {
       setPdfProgress({
         current,
         total,
@@ -869,7 +898,9 @@ export default function Home() {
       };
     }
 
-    pdfReadCache.current.set(cacheKey, toCachedPdfReadResult(pageResult));
+    if (pageResult.aiExtraction !== "failed") {
+      pdfReadCache.current.set(cacheKey, toCachedPdfReadResult(pageResult));
+    }
 
     return pageResult;
   }
@@ -927,6 +958,15 @@ export default function Home() {
       const parsedSheet = parseSheet(pageResult.row.sheet);
 
       setPreAnalysisResult(pageResult);
+
+      if (isProviderUnavailable(pageResult)) {
+        setPdfReadError(
+          pageResult.aiError ??
+            "A API de IA recusou a leitura do selo. A análise não foi iniciada.",
+        );
+        return;
+      }
+
       setLdData((currentData) => ({ ...currentData, ...deriveLdDataFromRow(pageResult.row) }));
 
       if (parsedSheet) {
@@ -1145,8 +1185,8 @@ export default function Home() {
         }
       }
 
-      for (let index = 0; index < pageJobs.length; index += 4) {
-        const batch = pageJobs.slice(index, index + 4);
+      for (let index = 0; index < pageJobs.length; index += maxConcurrentVisualPages) {
+        const batch = pageJobs.slice(index, index + maxConcurrentVisualPages);
         const batchResults = await Promise.all(
           batch.map(async (job, batchIndex) => {
             const page = await job.pdf.getPage(job.pageNumber);
@@ -1162,6 +1202,16 @@ export default function Home() {
             });
           }),
         );
+
+        if (batchResults.every(isProviderUnavailable)) {
+          setPdfReadResults([...nextResults, ...batchResults]);
+          setPdfReadError(
+            `Análise interrompida sem gerar linhas vazias: ${
+              batchResults[0].aiError ?? "a API de IA recusou este lote."
+            }`,
+          );
+          return;
+        }
 
         nextResults.push(...batchResults);
         setPdfReadResults([...nextResults]);
@@ -1794,13 +1844,7 @@ function PreAnalysisPanel({
           <div className="rounded-md border border-border bg-muted p-3">
             <dt className="text-xs text-muted-foreground">Origem</dt>
             <dd className="mt-1 font-semibold">
-              {result.aiExtraction === "text"
-                ? "IA textual"
-                : result.aiExtraction === "visual"
-                  ? "IA visual"
-                  : result.aiExtraction === "failed"
-                    ? "Falha na IA"
-                    : "Parser local"}
+              {describeExtractionSource(result)}
             </dd>
           </div>
         </dl>
@@ -2090,7 +2134,7 @@ function ReviewTable({
                     </label>
                     {result && (
                       <p className="text-xs text-muted-foreground">
-                        Origem: {result.aiExtraction === "text" ? "IA textual" : result.aiExtraction === "visual" ? "IA visual" : result.aiExtraction === "failed" ? "falha na IA" : "parser local"}
+                        Origem: {describeExtractionSource(result)}
                       </p>
                     )}
                   </div>
@@ -2198,13 +2242,7 @@ function StampZoomOverlay({
             <div>
               <dt className="text-xs uppercase tracking-[0.08em] text-muted-foreground">Origem</dt>
               <dd className="mt-1">
-                {result.aiExtraction === "text"
-                  ? "IA textual"
-                  : result.aiExtraction === "visual"
-                    ? "IA visual"
-                    : result.aiExtraction === "failed"
-                      ? "Falha na IA"
-                      : "Parser local"}
+                {describeExtractionSource(result)}
               </dd>
             </div>
           </dl>
