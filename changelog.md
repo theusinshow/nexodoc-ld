@@ -2,6 +2,101 @@
 
 Todas as alterações relevantes deste projeto devem ser registradas aqui.
 
+## 2026-05-27
+
+### Ajustada extração para modo visual-first com paralelismo
+
+- A análise de página passou a priorizar a IA visual do selo, mantendo o texto extraído apenas como contexto auxiliar da região do selo.
+- Adicionado timeout de 10 segundos por chamada visual para evitar que uma prancha trave o lote inteiro.
+- A análise completa agora processa até 4 páginas em paralelo.
+- Adicionado cache em memória por arquivo, tamanho, data de modificação e página, reaproveitando resultados já lidos na mesma sessão.
+- A pré-análise da primeira página passou a usar o mesmo caminho de análise visual-first da análise completa.
+- O texto enviado como apoio à IA foi reduzido para regiões do selo, sem incluir a página completa no caminho principal.
+
+Arquivos impactados:
+
+- `src/app/page.tsx`
+- `changelog.md`
+
+Validações executadas:
+
+- `npm run test`
+- `npm run lint`
+- `npm run build`
+
+### Otimizadas chamadas de IA e revisão visual do selo
+
+- A análise de cada página agora usa primeiro o parser local e só chama IA textual quando algum campo obrigatório está ausente ou a leitura local está marcada como baixa confiança.
+- A leitura visual passou a começar por um recorte menor, `selo compacto`, antes de tentar o recorte normal, o ampliado e a página inteira.
+- O recorte visual usado na análise passa a guardar também a imagem maior, além da miniatura exibida na tabela.
+- A tabela de revisão ganhou ação `Ampliar selo`, abrindo uma visualização grande do recorte junto dos campos extraídos: número da folha, arquivo, descrição e origem da leitura.
+- A ampliação do selo usa dados já processados no navegador e não faz nova chamada para IA.
+
+Arquivos impactados:
+
+- `src/app/page.tsx`
+- `changelog.md`
+
+Validações executadas:
+
+- `npm run test`
+- `npm run lint`
+- `npm run build`
+
+### Alterado fluxo inicial para pré-análise dos PDFs
+
+- A primeira etapa do fluxo passou a ser importação dos PDFs, antes do formulário de dados da LD.
+- Ao anexar PDFs, o sistema analisa apenas a primeira página do primeiro arquivo para sugerir dados iniciais.
+- A pré-análise sugere código do projeto, código formatado, disciplina, revisão, título da seção e total de folhas quando esses dados podem ser inferidos do selo.
+- A etapa de dados da LD exibe as sugestões em campos editáveis e oferece o botão `Analisar todas as pranchas`.
+- A análise completa passou a usar os PDFs já carregados e só roda após confirmação do usuário.
+- Extraída uma função interna comum para análise de página, reaproveitada tanto pela pré-análise quanto pela análise completa.
+- Atualizado o README para documentar o novo fluxo inicial.
+
+Arquivos impactados:
+
+- `src/app/page.tsx`
+- `README.md`
+- `changelog.md`
+
+Validações executadas:
+
+- `npm run test`
+- `npm run lint`
+- `npm run build`
+
+### Iniciada estabilização do MVP com testes automatizados
+
+- Criado módulo `src/lib/ld-rules.ts` para concentrar regras puras de folhas, ordenação, tomos e validações.
+- Adicionado `vitest` como runner de testes automatizados.
+- Criada primeira suíte em `src/lib/ld-rules.test.ts`, cobrindo:
+  - parsing e formatação de folhas;
+  - ordenação por número da folha;
+  - distribuição balanceada de tomos;
+  - redistribuição segura ao alterar quantidade de pranchas por tomo;
+  - bloqueios por campos obrigatórios vazios;
+  - bloqueios por folha duplicada;
+  - alertas de folha faltante, total divergente, disciplina divergente e baixa confiança.
+- Corrigida a formatação de folhas para manter `NN/TT` também quando o total possui apenas um dígito, por exemplo `01/03`.
+- Atualizados `README.md` e `docs/09-roadmap.md` para refletir o estado atual do MVP e o novo comando de testes.
+
+Arquivos impactados:
+
+- `src/lib/ld-rules.ts`
+- `src/lib/ld-rules.test.ts`
+- `src/app/page.tsx`
+- `package.json`
+- `package-lock.json`
+- `README.md`
+- `docs/09-roadmap.md`
+- `changelog.md`
+
+Validações executadas:
+
+- `npm run test`
+- `npm run lint`
+- `npm run build`
+
 ## 2026-05-26
 
 ### Tornada segura a distribuição de tomos

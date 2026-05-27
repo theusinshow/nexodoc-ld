@@ -53,17 +53,25 @@ Leia o CODEX.md e todos os arquivos da pasta docs antes de implementar. Depois e
 
 ## Projeto implementado
 
-Esta base contém a fase 1 do laboratório:
+Esta base já contém um MVP funcional do laboratório:
 
 - Next.js App Router com TypeScript;
 - Tailwind CSS;
 - interface principal do Criador de LDs;
-- formulário de dados manuais;
-- upload visual mockado;
-- tabela de revisão editável com dados simulados;
-- ajuste de tomos mockado;
-- resumo final mockado;
-- tela final com downloads desabilitados e checklist visual.
+- fluxo inicial por upload: o usuário anexa os PDFs antes de preencher a LD;
+- pré-análise da primeira prancha para sugerir código, disciplina, revisão, título de seção e total;
+- formulário de dados manuais preenchido com sugestões editáveis;
+- análise completa sob confirmação do usuário, usando o conjunto de PDFs já carregado;
+- upload real de PDF único ou múltiplos PDFs;
+- leitura textual de pranchas com interpretação estruturada por IA;
+- fallback visual e reanálise individual de pranchas com OpenAI;
+- tabela de revisão editável com validações bloqueantes e alertas revisáveis;
+- divisão segura de tomos com intervalos calculados automaticamente;
+- geração real de ODT a partir do template oficial;
+- conversão para PDF com LibreOffice headless;
+- relatório MD de inconsistências quando houver alertas;
+- ZIP final com os arquivos gerados;
+- testes automatizados para regras centrais de folhas, tomos e validações.
 
 ## Rodando localmente
 
@@ -89,6 +97,12 @@ Execute o lint:
 
 ```bash
 npm run lint
+```
+
+Execute os testes automatizados:
+
+```bash
+npm run test
 ```
 
 ## Variáveis de ambiente

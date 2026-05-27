@@ -1,5 +1,32 @@
 # Roadmap — NexoDoc LD Lab
 
+## Estado em 2026-05-27
+
+As fases 1 a 6 ja possuem uma implementacao funcional no laboratorio:
+
+```text
+- fluxo visual principal;
+- validacoes reais da tabela;
+- leitura textual de PDFs;
+- interpretacao estruturada com OpenAI;
+- fallback visual e reanalise individual;
+- geracao de ODT via template oficial;
+- conversao para PDF;
+- relatorio MD de inconsistencias;
+- pacote ZIP final;
+- testes automatizados iniciais para regras centrais.
+```
+
+O foco atual deixa de ser expansao de escopo e passa a ser estabilizacao do MVP:
+
+```text
+- validar com PDFs reais representativos;
+- ampliar cobertura de testes;
+- refatorar o componente principal em modulos menores;
+- fazer QA visual do ODT/PDF final;
+- preparar limites operacionais antes da integracao com o NexoDoc principal.
+```
+
 ## Fase 1 — Base visual e fluxo mockado
 
 Objetivo:

@@ -18,7 +18,19 @@ import {
   Upload,
 } from "lucide-react";
 import Image from "next/image";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import {
+  buildBalancedTomos,
+  compareBySheet,
+  formatSheet,
+  parseSheet,
+  updateTomoQuantity,
+  validateRows,
+  type ReviewRow,
+  type RowIssue,
+  type Tomo,
+  type ValidationResult,
+} from "@/lib/ld-rules";
 
 type LdData = {
   projectCode: string;
@@ -30,16 +42,6 @@ type LdData = {
   workName: string;
   phase: string;
   templateMode: "padrao" | "alternativo";
-};
-
-type ReviewRow = {
-  id: number;
-  sheet: string;
-  file: string;
-  description: string;
-  readDiscipline: string;
-  lowConfidence: boolean;
-  reviewedAlertKeys: string[];
 };
 
 type PdfReadResult = {
@@ -56,15 +58,12 @@ type PdfReadResult = {
   aiExtraction: "not-used" | "text" | "visual" | "failed";
   aiError?: string;
   stampPreviewUrl?: string;
+  stampImageUrl?: string;
   extractionAttempt?: string;
 };
 
-type Tomo = {
-  id: number;
-  title: string;
-  start: string;
-  end: string;
-  quantity: number;
+type CachedPdfReadResult = Omit<PdfReadResult, "row"> & {
+  row: Omit<ReviewRow, "id">;
 };
 
 type GeneratedDownload = {
@@ -74,8 +73,8 @@ type GeneratedDownload = {
 };
 
 const steps = [
+  "Importar PDFs",
   "Dados da LD",
-  "Upload de pranchas",
   "Tabela de revisão",
   "Ajuste de tomos",
   "Resumo final",
@@ -153,30 +152,6 @@ const checklist = [
   "Conferir o relatório .md de inconsistências, se houver",
 ];
 
-type ParsedSheet = {
-  number: number;
-  total: number;
-};
-
-type RowIssue = {
-  key: string;
-  label: string;
-  severity: "blocker" | "warning";
-};
-
-type GlobalWarning = {
-  key: string;
-  label: string;
-};
-
-type ValidationResult = {
-  rowIssues: Record<number, RowIssue[]>;
-  blockingIssues: string[];
-  globalWarnings: GlobalWarning[];
-  totals: number[];
-  missingSheets: number[];
-};
-
 type PdfTextItem = {
   str: string;
   transform: number[];
@@ -206,80 +181,19 @@ type PdfProcessingProgress = {
   status: string;
 };
 
-type StampCropMode = "normal" | "expanded" | "full-page";
+type PdfJsDocument = {
+  numPages: number;
+  getPage: (pageNumber: number) => Promise<unknown>;
+};
+
+type StampCropMode = "tight" | "normal" | "expanded" | "full-page";
 
 const stampCropModes: Array<{ mode: StampCropMode; label: string }> = [
+  { mode: "tight", label: "selo compacto" },
   { mode: "normal", label: "recorte do selo" },
   { mode: "expanded", label: "recorte ampliado" },
   { mode: "full-page", label: "pagina inteira" },
 ];
-
-function parseSheet(value: string): ParsedSheet | null {
-  const match = value.trim().match(/(\d+)\s*\/\s*(\d+)/);
-
-  if (!match) {
-    return null;
-  }
-
-  return {
-    number: Number(match[1]),
-    total: Number(match[2]),
-  };
-}
-
-function formatSheet(number: number, total: number) {
-  const width = Math.max(2, String(total).length);
-  return `${String(number).padStart(width, "0")}/${total}`;
-}
-
-function buildBalancedQuantities(total: number, count: number) {
-  const safeCount = Math.max(1, Math.min(count, total));
-  const base = Math.floor(total / safeCount);
-  const remainder = total % safeCount;
-
-  return Array.from({ length: safeCount }, (_, index) => base + (index < remainder ? 1 : 0));
-}
-
-function buildTomosFromQuantities(total: number, quantities: number[]) {
-  let nextSheet = 1;
-
-  return quantities.map((quantity, index) => {
-    const endSheet = nextSheet + quantity - 1;
-    const tomo = {
-      id: index + 1,
-      title: `TOMO ${index + 1}`,
-      start: formatSheet(nextSheet, total),
-      end: formatSheet(endSheet, total),
-      quantity,
-    };
-
-    nextSheet = endSheet + 1;
-
-    return tomo;
-  });
-}
-
-function buildBalancedTomos(total: number, count: number) {
-  return buildTomosFromQuantities(total, buildBalancedQuantities(total, count));
-}
-
-function updateTomoQuantity(tomos: Tomo[], total: number, index: number, requestedQuantity: number) {
-  const minimumRemaining = tomos.length - index - 1;
-  const usedBefore = tomos.slice(0, index).reduce((sum, tomo) => sum + tomo.quantity, 0);
-  const maximum = total - usedBefore - minimumRemaining;
-  const quantity = Math.max(1, Math.min(requestedQuantity, maximum));
-  const remaining = total - usedBefore - quantity;
-  const laterQuantities = minimumRemaining > 0
-    ? buildBalancedQuantities(remaining, minimumRemaining)
-    : [];
-  const quantities = [
-    ...tomos.slice(0, index).map((tomo) => tomo.quantity),
-    quantity,
-    ...laterQuantities,
-  ];
-
-  return buildTomosFromQuantities(total, quantities);
-}
 
 function normalizeExtractedValue(value: string) {
   return value.replace(/\s+/g, " ").trim();
@@ -453,6 +367,51 @@ function hasMissingStampFields(result: PdfReadResult) {
   return !result.foundFields.sheet || !result.foundFields.file || !result.foundFields.description;
 }
 
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
+
+function getPdfPageCacheKey(file: File, pageNumber: number) {
+  return `${file.name}:${file.size}:${file.lastModified}:page-${pageNumber}`;
+}
+
+function toCachedPdfReadResult(result: PdfReadResult): CachedPdfReadResult {
+  const { id: _id, ...row } = result.row;
+
+  return {
+    ...result,
+    row,
+  };
+}
+
+function fromCachedPdfReadResult(cached: CachedPdfReadResult, id: number): PdfReadResult {
+  return {
+    ...cached,
+    row: {
+      ...cached.row,
+      id,
+      reviewedAlertKeys: [],
+    },
+  };
+}
+
+function deriveLdDataFromRow(row: ReviewRow): Partial<LdData> {
+  const fileMatch = row.file.match(/^(\d{2,4})[_\-.](\d{2})[_\-.]([A-Za-z]{2,})(?:[_\-.].*?)[_\-.]([A-Za-z0-9]+)$/);
+  const projectCode = fileMatch ? `${fileMatch[1]}_${fileMatch[2]}` : "";
+  const discipline = fileMatch?.[3] ?? row.readDiscipline;
+  const revision = fileMatch?.[4] ?? "";
+  const sectionTitle = row.description.includes(":")
+    ? row.description.split(":")[0].trim()
+    : "";
+
+  return {
+    ...(projectCode ? { projectCode, formattedCode: projectCode.replace("_", "-") } : {}),
+    ...(discipline ? { discipline: discipline.toLocaleLowerCase("pt-BR") } : {}),
+    ...(revision ? { revision: revision.toLocaleLowerCase("pt-BR") } : {}),
+    ...(sectionTitle ? { sectionTitle } : {}),
+  };
+}
+
 async function renderStampCropToDataUrl(pageProxy: unknown, mode: StampCropMode) {
   const page = pageProxy as {
   getViewport: (options: { scale: number }) => { width: number; height: number };
@@ -476,7 +435,9 @@ async function renderStampCropToDataUrl(pageProxy: unknown, mode: StampCropMode)
   await page.render({ canvasContext: context, canvas, viewport }).promise;
 
   const cropBounds =
-    mode === "normal"
+    mode === "tight"
+      ? { x: 0.62, y: 0.62 }
+      : mode === "normal"
       ? { x: 0.55, y: 0.55 }
       : mode === "expanded"
         ? { x: 0.4, y: 0.4 }
@@ -528,13 +489,17 @@ async function renderStampCropToDataUrl(pageProxy: unknown, mode: StampCropMode)
   };
 }
 
-async function requestVisualStampExtraction(imageDataUrl: string, pdfText: string) {
+async function requestVisualStampExtraction(imageDataUrl: string, pdfText: string, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
   const response = await fetch("/api/extract-stamp", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ imageDataUrl, pdfText }),
+    signal: controller.signal,
   });
 
   if (!response.ok) {
@@ -543,6 +508,15 @@ async function requestVisualStampExtraction(imageDataUrl: string, pdfText: strin
   }
 
   return (await response.json()) as VisualStampExtraction;
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("Tempo limite de 10s atingido na leitura visual por IA.");
+    }
+
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
 }
 
 async function requestTextStampExtraction(pdfText: string) {
@@ -622,151 +596,13 @@ function base64ToObjectUrl(base64: string, mimeType: string) {
   return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
 }
 
-function compareBySheet(a: ReviewRow, b: ReviewRow) {
-  const parsedA = parseSheet(a.sheet);
-  const parsedB = parseSheet(b.sheet);
-
-  if (parsedA && parsedB) {
-    return parsedA.number - parsedB.number;
-  }
-
-  if (parsedA) {
-    return -1;
-  }
-
-  if (parsedB) {
-    return 1;
-  }
-
-  return a.sheet.localeCompare(b.sheet, "pt-BR");
-}
-
-function validateRows(
-  rows: ReviewRow[],
-  discipline: string,
-  referenceTotal: number | null,
-): ValidationResult {
-  const rowIssues: Record<number, RowIssue[]> = {};
-  const blockingIssues: string[] = [];
-  const sheetOccurrences = new Map<number, number[]>();
-  const totals = new Set<number>();
-  const parsedRows = rows
-    .map((row) => ({ row, parsed: parseSheet(row.sheet) }))
-    .filter((item): item is { row: ReviewRow; parsed: ParsedSheet } => Boolean(item.parsed));
-
-  for (const { row, parsed } of parsedRows) {
-    totals.add(parsed.total);
-    sheetOccurrences.set(parsed.number, [...(sheetOccurrences.get(parsed.number) ?? []), row.id]);
-  }
-
-  for (const row of rows) {
-    const issues: RowIssue[] = [];
-    const parsed = parseSheet(row.sheet);
-    const normalizedDiscipline = discipline.trim().toLocaleLowerCase("pt-BR");
-    const normalizedReadDiscipline = row.readDiscipline.trim().toLocaleLowerCase("pt-BR");
-
-    if (!row.file.trim()) {
-      issues.push({
-        key: "empty-file",
-        label: "Erro: ARQUIVOS vazio",
-        severity: "blocker",
-      });
-      blockingIssues.push(`Linha ${row.id}: ARQUIVOS vazio.`);
-    }
-
-    if (!row.description.trim()) {
-      issues.push({
-        key: "empty-description",
-        label: "Erro: DESCRIÇÃO vazia",
-        severity: "blocker",
-      });
-      blockingIssues.push(`Linha ${row.id}: DESCRIÇÃO vazia.`);
-    }
-
-    if (parsed && (sheetOccurrences.get(parsed.number)?.length ?? 0) > 1) {
-      issues.push({
-        key: `duplicate-${parsed.number}`,
-        label: `Erro: folha ${formatSheet(parsed.number, parsed.total)} duplicada`,
-        severity: "blocker",
-      });
-      blockingIssues.push(`Folha ${formatSheet(parsed.number, parsed.total)} duplicada.`);
-    }
-
-    if (
-      normalizedDiscipline &&
-      normalizedReadDiscipline &&
-      normalizedDiscipline !== normalizedReadDiscipline
-    ) {
-      issues.push({
-        key: `discipline-${row.readDiscipline}`,
-        label: `Alerta: disciplina lida ${row.readDiscipline.toUpperCase()}`,
-        severity: "warning",
-      });
-    }
-
-    if (row.lowConfidence) {
-      issues.push({
-        key: "low-confidence",
-        label: "Alerta: leitura com baixa confiança",
-        severity: "warning",
-      });
-    }
-
-    if (parsed && referenceTotal && parsed.total !== referenceTotal) {
-      issues.push({
-        key: `total-${parsed.total}`,
-        label: `Alerta: total ${parsed.total}, referência ${referenceTotal}`,
-        severity: "warning",
-      });
-    }
-
-    rowIssues[row.id] = issues;
-  }
-
-  const totalReference = referenceTotal ?? (totals.size === 1 ? [...totals][0] : null);
-  const existingNumbers = new Set(parsedRows.map(({ parsed }) => parsed.number));
-  const missingSheets =
-    totalReference && totalReference > 0
-      ? Array.from({ length: totalReference }, (_, index) => index + 1).filter(
-          (number) => !existingNumbers.has(number),
-        )
-      : [];
-
-  const globalWarnings: GlobalWarning[] =
-    missingSheets.length > 0 && totalReference
-      ? [
-          {
-            key: "missing-sheets",
-            label: `Folhas não localizadas: ${missingSheets
-              .map((number) => formatSheet(number, totalReference))
-              .join(", ")}.`,
-          },
-        ]
-      : [];
-
-  if (totals.size > 1) {
-    globalWarnings.unshift({
-      key: "total-reference",
-      label: "Há totais diferentes na tabela. Defina o total de referência para validar as folhas.",
-    });
-  }
-
-  return {
-    rowIssues,
-    blockingIssues: [...new Set(blockingIssues)],
-    globalWarnings,
-    totals: [...totals].sort((a, b) => a - b),
-    missingSheets,
-  };
-}
-
 export default function Home() {
   const [activeStep, setActiveStep] = useState(0);
   const [ldData, setLdData] = useState<LdData>(initialLdData);
-  const [rows, setRows] = useState<ReviewRow[]>(initialRows);
-  const [tomos, setTomos] = useState<Tomo[]>(initialTomos);
-  const [referenceTotal, setReferenceTotal] = useState<number | null>(30);
-  const [manualTotal, setManualTotal] = useState("30");
+  const [rows, setRows] = useState<ReviewRow[]>([]);
+  const [tomos, setTomos] = useState<Tomo[]>([]);
+  const [referenceTotal, setReferenceTotal] = useState<number | null>(null);
+  const [manualTotal, setManualTotal] = useState("");
   const [reviewedGlobalWarnings, setReviewedGlobalWarnings] = useState<string[]>([]);
   const [pdfReadResults, setPdfReadResults] = useState<PdfReadResult[]>([]);
   const [pdfProcessing, setPdfProcessing] = useState(false);
@@ -778,6 +614,8 @@ export default function Home() {
   const [generatedDownloads, setGeneratedDownloads] = useState<GeneratedDownload[]>([]);
   const [packageGenerating, setPackageGenerating] = useState(false);
   const [packageError, setPackageError] = useState("");
+  const [preAnalysisResult, setPreAnalysisResult] = useState<PdfReadResult | null>(null);
+  const pdfReadCache = useRef(new Map<string, CachedPdfReadResult>());
 
   const baseName = `${ldData.projectCode}_${ldData.discipline}_ld_${ldData.revision}`;
   const validation = useMemo(
@@ -877,14 +715,17 @@ export default function Home() {
     for (const attempt of stampCropModes) {
       onAttempt?.(`IA visual: ${attempt.label}`);
       let previewDataUrl: string | undefined;
+      let imageDataUrl: string | undefined;
 
       try {
         const crop = await renderStampCropToDataUrl(page, attempt.mode);
         previewDataUrl = crop.previewDataUrl;
+        imageDataUrl = crop.imageDataUrl;
         const extraction = await requestVisualStampExtraction(crop.imageDataUrl, textResult.textForAi);
         const merged = {
           ...mergeAiExtraction(textResult, extraction, "visual"),
           stampPreviewUrl: crop.previewDataUrl,
+          stampImageUrl: crop.imageDataUrl,
           extractionAttempt: attempt.label,
         };
 
@@ -898,6 +739,7 @@ export default function Home() {
         lastResult = {
           ...lastResult,
           stampPreviewUrl: previewDataUrl ?? lastResult.stampPreviewUrl,
+          stampImageUrl: imageDataUrl ?? lastResult.stampImageUrl,
           extractionAttempt: attempt.label,
         };
 
@@ -918,7 +760,121 @@ export default function Home() {
     };
   }
 
-  async function processPdfFiles(fileList: FileList | File[]) {
+  async function analyzePdfPage({
+    file,
+    fileIndex,
+    page,
+    pageNumber,
+    id,
+    current,
+    total,
+  }: {
+    file: File;
+    fileIndex: number;
+    page: unknown;
+    pageNumber: number;
+    id: number;
+    current: number;
+    total: number;
+  }) {
+    const cacheKey = getPdfPageCacheKey(file, pageNumber);
+    const cached = pdfReadCache.current.get(cacheKey);
+
+    if (cached) {
+      setPdfProgress({
+        current,
+        total,
+        fileName: file.name,
+        pageNumber,
+        status: "Resultado recuperado do cache",
+      });
+
+      return fromCachedPdfReadResult(cached, id);
+    }
+
+    setPdfProgress({
+      current,
+      total,
+      fileName: file.name,
+      pageNumber,
+      status: "Preparando selo para IA visual",
+    });
+
+    const typedPage = page as {
+      getViewport: (options: { scale: number }) => {
+        width: number;
+        height: number;
+        convertToViewportPoint: (x: number, y: number) => [number, number];
+      };
+      getTextContent: () => Promise<{ items: unknown[] }>;
+    };
+    const viewport = typedPage.getViewport({ scale: 1 });
+    const textContent = await typedPage.getTextContent();
+    const textItems = textContent.items.filter(
+      (item): item is PdfTextItem =>
+        typeof item === "object" &&
+        item !== null &&
+        "str" in item &&
+        "transform" in item,
+    );
+    const positionedItems = textItems.map((item) => {
+      const [x, y] = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
+
+      return {
+        x,
+        y,
+        text: item.str,
+      };
+    });
+    const stampItems = positionedItems.filter(
+      (item) => item.x >= viewport.width * 0.55 && item.y >= viewport.height * 0.55,
+    );
+    const expandedStampItems = positionedItems.filter(
+      (item) => item.x >= viewport.width * 0.45 && item.y >= viewport.height * 0.45,
+    );
+    const fullText = groupTextLines(positionedItems).join(" ");
+    const stampText = groupTextLines(stampItems).join(" ");
+    const expandedStampText = groupTextLines(expandedStampItems).join(" ");
+    const candidateText = stampText || expandedStampText || fullText;
+    const textForAi = [
+      stampText ? `REGIAO DO SELO:\n${stampText}` : "",
+      expandedStampText && expandedStampText !== stampText
+        ? `REGIAO AMPLIADA:\n${expandedStampText}`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+      .slice(0, 12000);
+    const textResult = parsePdfTextToRow(
+      candidateText,
+      fullText,
+      file.name,
+      pageNumber,
+      id,
+      fileIndex,
+      textForAi,
+      referenceTotal,
+    );
+    let pageResult = await extractWithProgressiveVision(page, textResult, (status) => {
+      setPdfProgress({ current, total, fileName: file.name, pageNumber, status });
+    });
+
+    if (hasMissingStampFields(pageResult)) {
+      pageResult = {
+        ...pageResult,
+        row: {
+          ...pageResult.row,
+          lowConfidence: true,
+        },
+      };
+    }
+
+    pdfReadCache.current.set(cacheKey, toCachedPdfReadResult(pageResult));
+
+    return pageResult;
+  }
+
+  async function preAnalyzePdfFiles(fileList: FileList | File[]) {
     const files = Array.from(fileList).filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
 
     if (files.length === 0) {
@@ -932,6 +888,7 @@ export default function Home() {
     setRows([]);
     setReviewedGlobalWarnings([]);
     setUploadedPdfFiles(files);
+    setPreAnalysisResult(null);
     setPdfProgress(null);
     setReferenceTotal(null);
     setManualTotal("");
@@ -943,24 +900,43 @@ export default function Home() {
         import.meta.url,
       ).toString();
 
+      const firstFile = files[0];
       const documents = [];
-      let totalPages = 0;
+      const totalPages = 1;
 
-      for (const [fileIndex, file] of files.entries()) {
-        setPdfProgress({
-          current: 0,
-          total: 0,
-          fileName: file.name,
-          pageNumber: 0,
-          status: "Abrindo PDF",
-        });
-        const data = await file.arrayBuffer();
-        const documentTask = pdfjs.getDocument({ data });
-        const pdf = await documentTask.promise;
+      setPdfProgress({
+        current: 0,
+        total: 1,
+        fileName: firstFile.name,
+        pageNumber: 0,
+        status: "Abrindo PDF",
+      });
+      const data = await firstFile.arrayBuffer();
+      const documentTask = pdfjs.getDocument({ data });
+      const pdf = await documentTask.promise as PdfJsDocument;
+      const page = await pdf.getPage(1);
+      const pageResult = await analyzePdfPage({
+        file: firstFile,
+        fileIndex: 0,
+        page,
+        pageNumber: 1,
+        id: 1,
+        current: 1,
+        total: 1,
+      });
+      const parsedSheet = parseSheet(pageResult.row.sheet);
 
-        documents.push({ file, fileIndex, pdf });
-        totalPages += pdf.numPages;
+      setPreAnalysisResult(pageResult);
+      setLdData((currentData) => ({ ...currentData, ...deriveLdDataFromRow(pageResult.row) }));
+
+      if (parsedSheet) {
+        changeReferenceTotal(parsedSheet.total);
       }
+
+      setActiveStep(1);
+      return;
+
+      documents.push({ file: firstFile, fileIndex: 0, pdf });
 
       const nextResults: PdfReadResult[] = [];
       let nextId = 1;
@@ -978,15 +954,20 @@ export default function Home() {
           const page = await pdf.getPage(pageNumber);
           const viewport = page.getViewport({ scale: 1 });
           const textContent = await page.getTextContent();
-          const textItems = textContent.items.filter((item) => "str" in item && "transform" in item);
+          const textItems: PdfTextItem[] = textContent.items.filter(
+            (item: unknown): item is PdfTextItem =>
+              typeof item === "object" &&
+              item !== null &&
+              "str" in item &&
+              "transform" in item,
+          );
           const positionedItems = textItems.map((item) => {
-            const textItem = item as PdfTextItem;
-            const [x, y] = viewport.convertToViewportPoint(textItem.transform[4], textItem.transform[5]);
+            const [x, y] = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
 
             return {
               x,
               y,
-              text: textItem.str,
+              text: item.str,
             };
           });
           const stampItems = positionedItems.filter(
@@ -1022,9 +1003,10 @@ export default function Home() {
           );
           let pageResult = textResult;
           let textAiError = "";
+          const shouldUseTextAi = hasMissingStampFields(textResult) || textResult.row.lowConfidence;
 
           try {
-            if (textForAi) {
+            if (textForAi && shouldUseTextAi) {
               setPdfProgress({
                 current,
                 total: totalPages,
@@ -1036,10 +1018,7 @@ export default function Home() {
               pageResult = mergeAiExtraction(textResult, textExtraction, "text");
             }
           } catch (textError) {
-            textAiError =
-              textError instanceof Error
-                ? textError.message
-                : "Leitura textual por IA falhou.";
+            textAiError = getErrorMessage(textError, "Leitura textual por IA falhou.");
           }
 
           if (hasMissingStampFields(pageResult) || pageResult.row.lowConfidence) {
@@ -1069,9 +1048,17 @@ export default function Home() {
           }
 
           nextResults.push(pageResult);
-          setPdfReadResults([...nextResults]);
-          setRows(nextResults.map((result) => result.row).sort(compareBySheet));
-          nextId += 1;
+          setPreAnalysisResult(pageResult);
+          setLdData((currentData) => ({ ...currentData, ...deriveLdDataFromRow(pageResult.row) }));
+
+          const parsedSheetTotal = parseSheet(pageResult.row.sheet)?.total;
+
+          if (typeof parsedSheetTotal === "number") {
+            changeReferenceTotal(Number(parsedSheetTotal));
+          }
+
+          setActiveStep(1);
+          return;
         }
       }
 
@@ -1089,6 +1076,114 @@ export default function Home() {
         const [total] = [...totals];
         changeReferenceTotal(total);
       }
+    } catch (error) {
+      setPdfReadError(error instanceof Error ? error.message : "Não foi possível ler o PDF selecionado.");
+    } finally {
+      setPdfProcessing(false);
+      setPdfProgress(null);
+    }
+  }
+
+  async function processPdfFiles(fileList: FileList | File[] = uploadedPdfFiles) {
+    const files = Array.from(fileList).filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
+
+    if (files.length === 0) {
+      setPdfReadError("Selecione ao menos um arquivo PDF.");
+      return;
+    }
+
+    setPdfProcessing(true);
+    setPdfReadError("");
+    setPdfReadResults([]);
+    setRows([]);
+    setReviewedGlobalWarnings([]);
+    setUploadedPdfFiles(files);
+    setPdfProgress(null);
+
+    try {
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+      pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+        "pdfjs-dist/legacy/build/pdf.worker.mjs",
+        import.meta.url,
+      ).toString();
+
+      const documents: Array<{ file: File; fileIndex: number; pdf: PdfJsDocument }> = [];
+      let totalPages = 0;
+
+      for (const [fileIndex, file] of files.entries()) {
+        setPdfProgress({
+          current: 0,
+          total: 0,
+          fileName: file.name,
+          pageNumber: 0,
+          status: "Abrindo PDF",
+        });
+        const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise as PdfJsDocument;
+
+        documents.push({ file, fileIndex, pdf });
+        totalPages += pdf.numPages;
+      }
+
+      const nextResults: PdfReadResult[] = [];
+      const pageJobs: Array<{
+        file: File;
+        fileIndex: number;
+        pdf: PdfJsDocument;
+        pageNumber: number;
+        id: number;
+      }> = [];
+
+      for (const { file, fileIndex, pdf } of documents) {
+        for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+          pageJobs.push({
+            file,
+            fileIndex,
+            pdf,
+            pageNumber,
+            id: pageJobs.length + 1,
+          });
+        }
+      }
+
+      for (let index = 0; index < pageJobs.length; index += 4) {
+        const batch = pageJobs.slice(index, index + 4);
+        const batchResults = await Promise.all(
+          batch.map(async (job, batchIndex) => {
+            const page = await job.pdf.getPage(job.pageNumber);
+
+            return analyzePdfPage({
+              file: job.file,
+              fileIndex: job.fileIndex,
+              page,
+              pageNumber: job.pageNumber,
+              id: job.id,
+              current: index + batchIndex + 1,
+              total: totalPages,
+            });
+          }),
+        );
+
+        nextResults.push(...batchResults);
+        setPdfReadResults([...nextResults]);
+        setRows(nextResults.map((result) => result.row).sort(compareBySheet));
+      }
+
+      setPdfReadResults(nextResults);
+      setRows(nextResults.map((result) => result.row).sort(compareBySheet));
+      setReviewedGlobalWarnings([]);
+
+      const totals = new Set(
+        nextResults
+          .map((result) => parseSheet(result.row.sheet)?.total)
+          .filter((total): total is number => typeof total === "number"),
+      );
+
+      if (totals.size === 1) {
+        const [total] = [...totals];
+        changeReferenceTotal(total);
+      }
+
+      setActiveStep(2);
     } catch (error) {
       setPdfReadError(error instanceof Error ? error.message : "Não foi possível ler o PDF selecionado.");
     } finally {
@@ -1138,6 +1233,7 @@ export default function Home() {
 
   function resetRows() {
     setRows(initialRows);
+    setTomos(initialTomos);
     changeReferenceTotal(30);
     setReviewedGlobalWarnings([]);
   }
@@ -1182,6 +1278,14 @@ export default function Home() {
   }
 
   function goNext() {
+    if (activeStep === 0 && !preAnalysisResult) {
+      return;
+    }
+
+    if (activeStep === 1 && rows.length === 0) {
+      return;
+    }
+
     if (activeStep === 2 && !canAdvancePastReview) {
       return;
     }
@@ -1364,6 +1468,17 @@ export default function Home() {
 
           <div className="p-5">
             {activeStep === 0 && (
+              <>
+                <UploadStep onFilesSelected={preAnalyzePdfFiles} processing={pdfProcessing} />
+                <PdfReadSummary
+                  results={preAnalysisResult ? [preAnalysisResult] : []}
+                  processing={pdfProcessing}
+                  error={pdfReadError}
+                  progress={pdfProgress}
+                />
+              </>
+            )}
+            {activeStep === 1 && (
               <LdForm
                 data={ldData}
                 templateFile={templateFile}
@@ -1372,7 +1487,12 @@ export default function Home() {
               />
             )}
             {activeStep === 1 && (
-              <UploadStep onFilesSelected={processPdfFiles} processing={pdfProcessing} />
+              <PreAnalysisPanel
+                files={uploadedPdfFiles}
+                result={preAnalysisResult}
+                processing={pdfProcessing}
+                onAnalyzeAll={() => processPdfFiles()}
+              />
             )}
             {activeStep === 1 && (
               <PdfReadSummary
@@ -1450,12 +1570,20 @@ export default function Home() {
               onClick={goNext}
               disabled={
                 activeStep === steps.length - 1 ||
+                (activeStep === 0 && !preAnalysisResult) ||
+                (activeStep === 1 && rows.length === 0) ||
                 (activeStep === 2 && !canAdvancePastReview) ||
                 (activeStep === 3 && !canAdvancePastTomos)
               }
               className="inline-flex items-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              {activeStep === 2 ? "Validar e avançar" : "Avançar"}
+              {activeStep === 0 && !preAnalysisResult
+                ? "Importe os PDFs"
+                : activeStep === 1 && rows.length === 0
+                ? "Analise completa pendente"
+                : activeStep === 2
+                  ? "Validar e avançar"
+                  : "Avançar"}
               <ChevronRight size={16} />
             </button>
           </footer>
@@ -1621,6 +1749,66 @@ function UploadPanel({
   );
 }
 
+function PreAnalysisPanel({
+  files,
+  result,
+  processing,
+  onAnalyzeAll,
+}: {
+  files: File[];
+  result: PdfReadResult | null;
+  processing: boolean;
+  onAnalyzeAll: () => void;
+}) {
+  return (
+    <div className="mt-4 rounded-md border border-border bg-background p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h3 className="text-sm font-semibold">Pré-análise dos PDFs</h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {files.length > 0
+              ? `${files.length} arquivo(s) carregado(s). Confira os dados sugeridos acima antes de analisar todas as pranchas.`
+              : "Carregue os PDFs na primeira etapa para sugerir os dados da LD."}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onAnalyzeAll}
+          disabled={processing || files.length === 0}
+          className="inline-flex items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {processing ? <Loader2 size={16} className="animate-spin" /> : <FileSearch size={16} />}
+          Analisar todas as pranchas
+        </button>
+      </div>
+      {result && (
+        <dl className="mt-4 grid gap-2 text-sm sm:grid-cols-3">
+          <div className="rounded-md border border-border bg-muted p-3">
+            <dt className="text-xs text-muted-foreground">Prancha lida</dt>
+            <dd className="mt-1 font-mono font-semibold">{result.row.sheet || "Não localizada"}</dd>
+          </div>
+          <div className="rounded-md border border-border bg-muted p-3">
+            <dt className="text-xs text-muted-foreground">Arquivo</dt>
+            <dd className="mt-1 truncate font-mono font-semibold">{result.row.file || "Não localizado"}</dd>
+          </div>
+          <div className="rounded-md border border-border bg-muted p-3">
+            <dt className="text-xs text-muted-foreground">Origem</dt>
+            <dd className="mt-1 font-semibold">
+              {result.aiExtraction === "text"
+                ? "IA textual"
+                : result.aiExtraction === "visual"
+                  ? "IA visual"
+                  : result.aiExtraction === "failed"
+                    ? "Falha na IA"
+                    : "Parser local"}
+            </dd>
+          </div>
+        </dl>
+      )}
+    </div>
+  );
+}
+
 function PdfReadSummary({
   results,
   processing,
@@ -1741,6 +1929,7 @@ function ReviewTable({
   onToggleGlobalWarning: (key: string, checked: boolean) => void;
   onReprocess: (rowId: number) => void;
 }) {
+  const [zoomedStamp, setZoomedStamp] = useState<PdfReadResult | null>(null);
   const warningIssues = rows.flatMap((row) =>
     (validation.rowIssues[row.id] ?? []).filter((issue) => issue.severity === "warning"),
   );
@@ -1863,8 +2052,15 @@ function ReviewTable({
                         width={160}
                         height={80}
                         unoptimized
-                        className="h-20 w-40 rounded-sm border border-border bg-background object-contain"
+                        className="h-20 w-40 rounded-sm border border-border bg-background object-contain transition hover:border-accent"
                       />
+                      <button
+                        type="button"
+                        onClick={() => setZoomedStamp(result)}
+                        className="text-xs font-medium text-accent transition hover:text-foreground"
+                      >
+                        Ampliar selo
+                      </button>
                       <p className="text-xs text-muted-foreground">
                         {result.extractionAttempt ?? "Recorte analisado"}
                       </p>
@@ -1936,6 +2132,83 @@ function ReviewTable({
             })}
           </tbody>
         </table>
+      </div>
+      {zoomedStamp && (
+        <StampZoomOverlay result={zoomedStamp} onClose={() => setZoomedStamp(null)} />
+      )}
+    </div>
+  );
+}
+
+function StampZoomOverlay({
+  result,
+  onClose,
+}: {
+  result: PdfReadResult;
+  onClose: () => void;
+}) {
+  const imageUrl = result.stampImageUrl ?? result.stampPreviewUrl;
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
+      <div className="max-h-[92vh] w-full max-w-5xl overflow-hidden rounded-md border border-border bg-surface">
+        <div className="flex items-start justify-between gap-4 border-b border-border px-4 py-3">
+          <div>
+            <h3 className="text-sm font-semibold">Conferência do selo</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {result.fileName}, página {result.pageNumber}. Recorte: {result.extractionAttempt ?? "não informado"}.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-border px-3 py-1.5 text-sm transition hover:bg-muted"
+          >
+            Fechar
+          </button>
+        </div>
+        <div className="grid max-h-[calc(92vh-64px)] gap-4 overflow-auto p-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+          <div className="min-h-80 overflow-auto rounded-sm border border-border bg-background p-3">
+            {imageUrl ? (
+              <Image
+                src={imageUrl}
+                alt={`Selo ampliado de ${result.fileName}, página ${result.pageNumber}`}
+                width={1200}
+                height={800}
+                unoptimized
+                className="h-auto min-w-full object-contain"
+              />
+            ) : (
+              <p className="text-sm text-muted-foreground">Nenhuma imagem de selo foi registrada para esta linha.</p>
+            )}
+          </div>
+          <dl className="space-y-3 rounded-sm border border-border bg-background p-3 text-sm">
+            <div>
+              <dt className="text-xs uppercase tracking-[0.08em] text-muted-foreground">Nº da folha</dt>
+              <dd className="mt-1 font-mono">{result.row.sheet || "Não localizado"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs uppercase tracking-[0.08em] text-muted-foreground">Arquivo</dt>
+              <dd className="mt-1 break-all font-mono">{result.row.file || "Não localizado"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs uppercase tracking-[0.08em] text-muted-foreground">Descrição</dt>
+              <dd className="mt-1 leading-relaxed">{result.row.description || "Não localizada"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs uppercase tracking-[0.08em] text-muted-foreground">Origem</dt>
+              <dd className="mt-1">
+                {result.aiExtraction === "text"
+                  ? "IA textual"
+                  : result.aiExtraction === "visual"
+                    ? "IA visual"
+                    : result.aiExtraction === "failed"
+                      ? "Falha na IA"
+                      : "Parser local"}
+              </dd>
+            </div>
+          </dl>
+        </div>
       </div>
     </div>
   );
